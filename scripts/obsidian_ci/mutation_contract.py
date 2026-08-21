@@ -61,8 +61,9 @@ created-by-official-obsidian-cli-73915
     report.add("obsidian-cli-mutations", "create/read/property/append/prepend persisted")
 
     cli.run("create", "path=Mutable.md", "content=mutable-target", "overwrite")
+    linker_content = cli_content("Links to [[Mutable]].\n")
     cli.run(
-        "create", "path=Linker.md", f"content={cli_content('Links to [[Mutable]].\n')}", "overwrite"
+        "create", "path=Linker.md", f"content={linker_content}", "overwrite"
     )
     wait_for(
         "linker metadata",
