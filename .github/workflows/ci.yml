@@ -2,14 +2,23 @@ name: CI
 
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  OBSIDIAN_VERSION: "1.13.7"
+
 jobs:
-  test:
+  core:
+    name: Core / Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -21,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile
-        run: PYTHONPATH=src python -m compileall -q src tests
+        run: PYTHONPATH=src python -m compileall -q src scripts tests
       - name: Unit tests
         run: PYTHONPATH=src python -m unittest discover -s tests -v
       - name: CLI smoke test
@@ -30,3 +39,68 @@ jobs:
           PYTHONPATH=src python -m autonomic_kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
       - name: Benchmark guardrail
         run: PYTHONPATH=src python benchmarks/run.py
+
+  real-obsidian:
+    name: Real Obsidian desktop + official CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Initialize real-Obsidian diagnostics
+        run: mkdir -p test-artifacts .ci-cache
+
+      - name: Cache pinned Obsidian AppImage
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache
+          key: obsidian-appimage-${{ runner.os }}-${{ env.OBSIDIAN_VERSION }}
+
+      - name: Download and verify official Obsidian release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/download_obsidian_ci.py \
+            --version "$OBSIDIAN_VERSION" \
+            --output .ci-cache/Obsidian.AppImage \
+            --metadata .ci-cache/obsidian-release.json \
+            2>&1 | tee test-artifacts/obsidian-download.log
+          cp .ci-cache/obsidian-release.json test-artifacts/
+          cp .ci-cache/Obsidian.AppImage ci/obsidian/Obsidian.AppImage
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build isolated real-Obsidian test image
+        uses: docker/build-push-action@v6
+        with:
+          context: ci/obsidian
+          file: ci/obsidian/Dockerfile
+          load: true
+          tags: autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
+          build-args: |
+            OBSIDIAN_VERSION=${{ env.OBSIDIAN_VERSION }}
+          cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}
+          cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}
+
+      - name: Run Obsidian in Ozone headless mode and execute contract tests
+        run: |
+          docker run --rm --init \
+            --network=none \
+            --shm-size=1g \
+            -e OBSIDIAN_VERSION="$OBSIDIAN_VERSION" \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/test-artifacts:/artifacts:rw" \
+            autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
+
+      - name: Upload real-Obsidian diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-obsidian-${{ env.OBSIDIAN_VERSION }}-${{ github.run_attempt }}
+          path: test-artifacts
+          if-no-files-found: error
+          retention-days: 14

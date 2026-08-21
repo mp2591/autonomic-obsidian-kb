@@ -1,6 +1,6 @@
 # Obsidian CLI and ecosystem research
 
-Research date: **2026-08-21**. Primary references are the first-party Obsidian Help documentation, official release notes/changelog, official URI documentation, and the Obsidian-maintained help repository. Community tools are identified separately and are not treated as first-party guarantees.
+Research date: **2026-08-21**. The CI compatibility pin is the latest public desktop release identified during implementation, **Obsidian 1.13.7** (released 2026-08-12). Primary references are the first-party Obsidian Help documentation, official release notes/changelog, official URI documentation, and the Obsidian-maintained help repository. Community tools are identified separately and are not treated as first-party guarantees.
 
 ## Executive finding
 
@@ -38,7 +38,9 @@ These benefits are conditional on a responsive app process and its current vault
 
 ## Running-app and headless boundary
 
-The general first-party CLI communicates with Obsidian desktop and therefore requires Obsidian to be installed and running for app-backed commands. Startup, vault selection, desktop availability, and metadata-cache freshness become operational dependencies. This is unsuitable as the sole mechanism for unattended Linux containers, remote coding sandboxes, or CI.
+The general first-party CLI communicates with Obsidian desktop and therefore requires Obsidian to be installed and running for app-backed commands. Startup, vault selection, desktop availability, and metadata-cache freshness become operational dependencies. This is unsuitable as the sole retrieval mechanism for unattended agents, but the desktop application can still be executed inside a controlled Linux test container.
+
+The repository's real-app CI launches the extracted official AppImage with Chromium's `--ozone-platform=headless` backend while both `DISPLAY` and `WAYLAND_DISPLAY` are unset. It pre-registers an isolated vault and persists CLI activation in the Linux global config before app startup. The `"cli": true` key is treated as an implementation detail rather than a documented public configuration API, so the job verifies the live first-party CLI on every run instead of assuming the key remains valid. No Xvfb fallback is installed; failure of Ozone headless startup fails the compatibility gate.
 
 Obsidian also has first-party/officially documented headless Sync-oriented tooling for synchronizing vault files in server workflows. Sync transport is not equivalent to a headless Obsidian metadata/search engine: it does not replace local parsing, retrieval scoring, provenance validation, or agent context budgeting.
 
@@ -100,7 +102,7 @@ For agent retrieval, the system should use one local indexed query and reserve a
 4. Obsidian CLI calls must be batched, capability-probed, timeout-bounded, and optional.
 5. Community plugins/MCP servers are integrations, not trusted core dependencies.
 6. Embeddings and graph databases must prove positive net token savings over FTS + explicit relationships.
-7. The system should compare its parsed properties/links with Obsidian periodically when the app is available, using discrepancies as validation signals.
+7. CI must compare parsed properties, tags, links, backlinks, search, tasks, and mutations with the real Obsidian metadata cache and first-party CLI; discrepancies are release-blocking validation signals.
 
 ## Reproducible local verification
 
@@ -110,17 +112,19 @@ obsidian version
 kb --json --vault /path/to/vault obsidian --capabilities
 ```
 
-Store the resulting help/version snapshot with the deployment’s benchmark record. This is more reliable than assuming a command added by a newer desktop release exists everywhere.
+Store the resulting help/version snapshot with the deployment’s benchmark record. CI additionally stores the verified release-asset digest, live process command, app logs, full CLI transcript, metadata-cache snapshot, and parity report. See [`../testing.md`](../testing.md). This is more reliable than assuming a command added by a newer desktop release exists everywhere.
 
 ## Primary references
 
-- Obsidian Help, **Obsidian CLI**: <https://help.obsidian.md/cli>
+- Obsidian Help, **Obsidian CLI**: <https://obsidian.md/help/cli>
 - Obsidian Help, **Search**: <https://help.obsidian.md/plugins/search>
 - Obsidian Help, **Properties**: <https://help.obsidian.md/properties>
 - Obsidian Help, **Internal links**: <https://help.obsidian.md/links>
 - Obsidian Help, **Tags**: <https://help.obsidian.md/tags>
 - Obsidian Help, **Obsidian URI**: <https://help.obsidian.md/Extending+Obsidian/Obsidian+URI>
 - Obsidian Help repository: <https://github.com/obsidianmd/obsidian-help>
+- Obsidian 1.13.7 desktop changelog: <https://obsidian.md/changelog/2026-08-12-desktop-v1.13.7/>
 - Obsidian changelog: <https://obsidian.md/changelog/>
+- Chromium Ozone overview (`--ozone-platform=headless`): <https://chromium.googlesource.com/chromium/src/+/main/docs/ozone_overview.md>
 
 The runtime adapter intentionally treats the installed binary’s help output as the final command-level authority because release cadence can move faster than pinned documentation.
