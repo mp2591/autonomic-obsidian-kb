@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+dist/
+build/
+.DS_Store
+
+# Disposable local acceleration and runtime state.
+**/.kb/index.sqlite3
+**/.kb/index.sqlite3-*
+**/.kb/actions.jsonl
+**/.kb/backups/
+**/.kb/contradictions.json
+**/.kb/last-*.json
+
+# Local build preservation is intentionally not published.
+.local-build-backup/

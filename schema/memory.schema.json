@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mp2591/autonomic-obsidian-kb/schema/memory.schema.json",
+  "title": "Autonomic Obsidian KB memory frontmatter",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "type",
+    "scope",
+    "status",
+    "summary",
+    "confidence",
+    "authority",
+    "updated"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^kb:[a-z0-9-]+:[a-z0-9-]+:[a-z0-9._:-]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "enum": [
+        "agent-instruction",
+        "api",
+        "architecture",
+        "command",
+        "convention",
+        "decision",
+        "dependency",
+        "domain",
+        "environment",
+        "fact",
+        "file-map",
+        "hypothesis",
+        "interface",
+        "invariant",
+        "known-failure",
+        "repository-map",
+        "solution",
+        "terminology",
+        "workflow"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "global",
+        "user",
+        "repository",
+        "project",
+        "module",
+        "branch",
+        "task",
+        "session"
+      ]
+    },
+    "status": {
+      "enum": [
+        "active",
+        "inbox",
+        "stale",
+        "conflicted",
+        "superseded",
+        "archived",
+        "quarantined"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "authority": {
+      "enum": [
+        "source-of-truth",
+        "authoritative",
+        "verified",
+        "user-corrected",
+        "derived",
+        "agent",
+        "external",
+        "untrusted"
+      ]
+    },
+    "repo": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string"
+    },
+    "module": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "created": {
+      "type": "string"
+    },
+    "updated": {
+      "type": "string"
+    },
+    "validated": {
+      "type": "string"
+    },
+    "freshness": {
+      "type": "string"
+    },
+    "token_cost": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "utility": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "applies_to": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "relations": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "invalidation": {
+      "type": "object"
+    },
+    "supersedes": {
+      "type": "string"
+    },
+    "superseded_by": {
+      "type": "string"
+    },
+    "claim_key": {
+      "type": "string"
+    },
+    "claim_value": {}
+  },
+  "additionalProperties": true
+}

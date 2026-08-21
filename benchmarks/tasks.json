@@ -1,0 +1,48 @@
+[
+  {
+    "name": "repository orientation",
+    "task": "Where are the CLI and retrieval ranking implemented, and what is authoritative?",
+    "budget": 260,
+    "paths": [
+      "src/autonomic_kb/cli.py"
+    ],
+    "expected_ids": [
+      "kb:repository:repository-map:project-layout",
+      "kb:repository:decision:markdown-authority"
+    ]
+  },
+  {
+    "name": "test command",
+    "task": "What exact command runs the complete test suite?",
+    "budget": 150,
+    "paths": [
+      "tests/test_cli.py"
+    ],
+    "expected_ids": [
+      "kb:repository:command:test-suite"
+    ]
+  },
+  {
+    "name": "retrieval architecture",
+    "task": "Explain the token budget retrieval pipeline and scope gates",
+    "budget": 300,
+    "paths": [
+      "src/autonomic_kb/retrieval.py"
+    ],
+    "expected_ids": [
+      "kb:repository:architecture:retrieval-pipeline"
+    ]
+  },
+  {
+    "name": "sqlite lock debugging",
+    "task": "Fix sqlite3 database is locked during repeated indexing tests",
+    "budget": 260,
+    "paths": [
+      "src/autonomic_kb/index.py"
+    ],
+    "expected_ids": [
+      "kb:repository:known-failure:sqlite-lock",
+      "kb:repository:solution:close-index-connections"
+    ]
+  }
+]
