@@ -31,19 +31,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Obsidian.AppImage /tmp/Obsidian.AppImage
-RUN chmod 0755 /tmp/Obsidian.AppImage \
-    && cd /opt \
-    && /tmp/Obsidian.AppImage --appimage-extract >/tmp/appimage-extract.log \
-    && mv /opt/squashfs-root /opt/obsidian \
-    && rm /tmp/Obsidian.AppImage \
-    && test -x /opt/obsidian/AppRun \
-    && test -x /opt/obsidian/obsidian \
-    && CLI_PATH="$(find /opt/obsidian -maxdepth 4 -type f -name obsidian-cli -print -quit)" \
-    && test -n "$CLI_PATH" \
-    && chmod 0755 "$CLI_PATH" \
-    && ln -s "$CLI_PATH" /usr/local/bin/obsidian \
-    && mkdir -p "$HOME" "$XDG_CONFIG_HOME/obsidian" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR" /artifacts \
-    && chmod 0700 "$XDG_RUNTIME_DIR"
+RUN set -eux; \
+    chmod 0755 /tmp/Obsidian.AppImage; \
+    cd /opt; \
+    /tmp/Obsidian.AppImage --appimage-extract >/tmp/appimage-extract.log; \
+    mv /opt/squashfs-root /opt/obsidian; \
+    rm /tmp/Obsidian.AppImage; \
+    test -x /opt/obsidian/AppRun; \
+    test -x /opt/obsidian/obsidian; \
+    CLI_PATH="$(find -L /opt/obsidian -type f -name obsidian-cli -print -quit)"; \
+    if [ -z "$CLI_PATH" ]; then \
+      echo "The extracted official AppImage did not expose obsidian-cli as a regular file." >&2; \
+      echo "Obsidian/CLI-related extracted entries:" >&2; \
+      find /opt/obsidian -maxdepth 8 \( -iname '*obsidian*' -o -iname '*cli*' \) -printf '%y %p -> %l\n' | sort >&2; \
+      exit 1; \
+    fi; \
+    echo "Installing first-party CLI from $CLI_PATH"; \
+    install -m 0755 "$CLI_PATH" /usr/local/bin/obsidian; \
+    mkdir -p "$HOME" "$XDG_CONFIG_HOME/obsidian" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR" /artifacts; \
+    chmod 0700 "$XDG_RUNTIME_DIR"
 
 COPY entrypoint.sh /usr/local/bin/obsidian-ci-entrypoint
 RUN chmod 0755 /usr/local/bin/obsidian-ci-entrypoint
