@@ -52,7 +52,8 @@ The desktop version is pinned in `.github/workflows/ci.yml`. A version update is
 - scalar and list frontmatter properties;
 - frontmatter and inline tags;
 - outgoing links, backlinks, nested links, and unresolved links;
-- full-text search, tasks, and outlines;
+- full-text search and task indexing;
+- headings obtained directly from Obsidian's metadata cache through the official `eval` command;
 - direct metadata-cache access through the official `eval` developer command;
 - parity between Obsidian's metadata cache and the KB parser/index;
 - token-budgeted KB retrieval from the same live vault;

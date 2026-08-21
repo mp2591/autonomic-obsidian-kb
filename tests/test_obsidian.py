@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autonomic_kb.obsidian import ObsidianBridge
+from autonomic_kb.obsidian import ObsidianBridge, parse_help_commands
 
 
 class ObsidianBridgeTests(unittest.TestCase):
@@ -47,6 +47,24 @@ class ObsidianBridgeTests(unittest.TestCase):
                     command,
                     ["/usr/bin/obsidian", "vault=ci-vault", "read", "path=Source.md"],
                 )
+
+
+    def test_help_parser_only_returns_top_level_commands(self) -> None:
+        help_text = """Commands:
+  files                 List files
+    folder=<path>       - Filter by folder
+    total               - Return file count
+  property:read         Read a property
+    name=<name>         - Property name
+
+Developer:
+  dev:screenshot        Take a screenshot
+    path=<filename>     - Output file path
+"""
+        self.assertEqual(
+            parse_help_commands(help_text),
+            ["dev:screenshot", "files", "property:read"],
+        )
 
     def test_timeout_is_returned_as_a_completed_process(self) -> None:
         timeout = subprocess.TimeoutExpired(["obsidian", "version"], 1, output=b"partial")

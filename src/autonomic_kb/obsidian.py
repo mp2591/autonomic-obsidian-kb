@@ -8,11 +8,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-_COMMAND = re.compile(r"^\s*([a-z][a-z0-9:-]*)\b", re.IGNORECASE)
-_COMMAND_HEADINGS = {
-    "usage", "options", "commands", "parameters", "flags", "examples",
-    "obsidian", "general", "developer",
-}
+_COMMAND = re.compile(r"^ {2}([a-z][a-z0-9:-]*)[ \t]{2,}\S", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_help_commands(help_text: str) -> list[str]:
+    """Return exact top-level commands from first-party ``obsidian help`` output.
+
+    Obsidian indents commands by two spaces and their parameters by four.
+    Matching the indentation prevents options such as ``file=<name>`` from
+    being misreported as commands, and parsing the complete help output avoids
+    losing commands that appear after a human-readable excerpt is truncated.
+    """
+
+    return sorted({match.group(1).lower() for match in _COMMAND.finditer(help_text)})
 
 
 @dataclass(slots=True)
@@ -92,20 +100,14 @@ class ObsidianBridge:
 
     def capabilities(self) -> dict[str, Any]:
         status = self.status()
-        commands: list[str] = []
-        if status.help_excerpt:
-            for line in status.help_excerpt.splitlines():
-                match = _COMMAND.match(line)
-                if not match:
-                    continue
-                token = match.group(1).lower().strip(":")
-                if token in _COMMAND_HEADINGS:
-                    continue
-                # Help descriptions and examples often begin with prose. A CLI
-                # command is one token and contains only command-name syntax.
-                if token.replace(":", "").replace("-", "").isalnum():
-                    commands.append(token)
-        return {"status": status.to_dict(), "discovered_commands": sorted(set(commands))}
+        help_result = self._run(["help"], timeout=5.0) if self.binary else None
+        help_text = ""
+        if help_result is not None:
+            help_text = help_result.stdout or help_result.stderr or ""
+        return {
+            "status": status.to_dict(),
+            "discovered_commands": parse_help_commands(help_text),
+        }
 
     def run(
         self,
