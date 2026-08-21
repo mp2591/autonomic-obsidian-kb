@@ -60,11 +60,40 @@ created-by-official-obsidian-cli-73915
             raise AssertionError(f"official CLI mutation missing {marker!r}: {mutated_text!r}")
     report.add("obsidian-cli-mutations", "create/read/property/append/prepend persisted")
 
-    cli.run("create", "path=Mutable.md", "content=mutable-target", "overwrite")
-    linker_content = cli_content("Links to [[Mutable]].\n")
-    cli.run(
-        "create", "path=Linker.md", f"content={linker_content}", "overwrite"
-    )
+    mutable_content = cli_content("""---
+id: kb:repository:fact:mutable
+title: Mutable Target
+type: fact
+scope: repository
+status: active
+summary: Structured target used to verify Obsidian link-aware rename behavior.
+confidence: 0.99
+authority: verified
+---
+# Mutable Target
+
+## L1 — Fact
+
+mutable-target
+""")
+    linker_content = cli_content("""---
+id: kb:repository:fact:linker
+title: Linker
+type: fact
+scope: repository
+status: active
+summary: Structured source used to verify Obsidian link-aware rename behavior.
+confidence: 0.99
+authority: verified
+---
+# Linker
+
+## L1 — Fact
+
+Links to [[Mutable]].
+""")
+    cli.run("create", "path=Mutable.md", f"content={mutable_content}", "overwrite")
+    cli.run("create", "path=Linker.md", f"content={linker_content}", "overwrite")
     wait_for(
         "linker metadata",
         lambda: "Mutable" in set(eval_snapshot(cli, "Linker.md").get("links", [])),
@@ -115,7 +144,14 @@ created-by-official-obsidian-cli-73915
 
     with KnowledgeIndex(config) as index:
         final_stats = index.rebuild()
-        for memory_id in ("kb:repository:fact:cli-created", "kb:repository:fact:kb-created"):
+        if final_stats.malformed:
+            raise AssertionError(f"real-Obsidian mutations produced malformed KB records: {final_stats.to_dict()}")
+        for memory_id in (
+            "kb:repository:fact:cli-created",
+            "kb:repository:fact:kb-created",
+            "kb:repository:fact:mutable",
+            "kb:repository:fact:linker",
+        ):
             if index.get(memory_id) is None:
                 raise AssertionError(f"KB index missed post-startup note {memory_id}")
         cli_record = index.get("kb:repository:fact:cli-created")
@@ -123,4 +159,19 @@ created-by-official-obsidian-cli-73915
             raise AssertionError(
                 f"KB parser missed Obsidian property mutation: {cli_record['metadata']!r}"
             )
-    report.add("post-mutation-kb-reindex", json.dumps(final_stats.to_dict(), sort_keys=True))
+        mutable_record = index.get("kb:repository:fact:mutable")
+        if mutable_record and mutable_record["path"] != "Renamed.md":
+            raise AssertionError(f"KB index missed Obsidian rename path: {mutable_record['path']!r}")
+        indexed_targets = {
+            row[0]
+            for row in index.connection.execute(
+                "SELECT target FROM links WHERE source_id=?",
+                ("kb:repository:fact:linker",),
+            )
+        }
+        if indexed_targets != {"Renamed"}:
+            raise AssertionError(f"KB graph missed Obsidian's rewritten link: {indexed_targets!r}")
+    report.add(
+        "post-mutation-kb-reindex",
+        json.dumps({**final_stats.to_dict(), "renamed_link_target": "Renamed"}, sort_keys=True),
+    )
