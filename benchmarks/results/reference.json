@@ -1,0 +1,104 @@
+{
+  "summary": {
+    "created_at": "2026-08-21T16:48:28Z",
+    "cases": 4,
+    "baseline_tokens": 7360,
+    "assisted_tokens": 1132,
+    "net_savings": 6228,
+    "net_reduction": 0.8462,
+    "mean_precision": 0.4583,
+    "mean_expected_coverage": 0.875,
+    "method": "deterministic proxy benchmark; token counts are model-independent estimates"
+  },
+  "cases": [
+    {
+      "name": "repository orientation",
+      "task": "Where are the CLI and retrieval ranking implemented, and what is authoritative?",
+      "budget": 260,
+      "baseline_tokens": 1840,
+      "retrieval_tokens": 36,
+      "injected_tokens": 255,
+      "maintenance_tokens": 18,
+      "assisted_tokens": 309,
+      "net_savings": 1531,
+      "reduction": 0.8321,
+      "expected_ids": [
+        "kb:repository:repository-map:project-layout",
+        "kb:repository:decision:markdown-authority"
+      ],
+      "retrieved_ids": [
+        "kb:repository:repository-map:project-layout",
+        "kb:repository:known-failure:sqlite-lock",
+        "kb:repository:command:test-suite"
+      ],
+      "precision": 0.3333,
+      "expected_coverage": 0.5
+    },
+    {
+      "name": "test command",
+      "task": "What exact command runs the complete test suite?",
+      "budget": 150,
+      "baseline_tokens": 1840,
+      "retrieval_tokens": 27,
+      "injected_tokens": 150,
+      "maintenance_tokens": 18,
+      "assisted_tokens": 195,
+      "net_savings": 1645,
+      "reduction": 0.894,
+      "expected_ids": [
+        "kb:repository:command:test-suite"
+      ],
+      "retrieved_ids": [
+        "kb:repository:command:test-suite",
+        "kb:repository:repository-map:project-layout"
+      ],
+      "precision": 0.5,
+      "expected_coverage": 1.0
+    },
+    {
+      "name": "retrieval architecture",
+      "task": "Explain the token budget retrieval pipeline and scope gates",
+      "budget": 300,
+      "baseline_tokens": 1840,
+      "retrieval_tokens": 30,
+      "injected_tokens": 280,
+      "maintenance_tokens": 18,
+      "assisted_tokens": 328,
+      "net_savings": 1512,
+      "reduction": 0.8217,
+      "expected_ids": [
+        "kb:repository:architecture:retrieval-pipeline"
+      ],
+      "retrieved_ids": [
+        "kb:repository:repository-map:project-layout",
+        "kb:repository:architecture:retrieval-pipeline",
+        "kb:repository:agent-instruction:minimal-context"
+      ],
+      "precision": 0.3333,
+      "expected_coverage": 1.0
+    },
+    {
+      "name": "sqlite lock debugging",
+      "task": "Fix sqlite3 database is locked during repeated indexing tests",
+      "budget": 260,
+      "baseline_tokens": 1840,
+      "retrieval_tokens": 31,
+      "injected_tokens": 251,
+      "maintenance_tokens": 18,
+      "assisted_tokens": 300,
+      "net_savings": 1540,
+      "reduction": 0.837,
+      "expected_ids": [
+        "kb:repository:known-failure:sqlite-lock",
+        "kb:repository:solution:close-index-connections"
+      ],
+      "retrieved_ids": [
+        "kb:repository:known-failure:sqlite-lock",
+        "kb:repository:solution:close-index-connections",
+        "kb:repository:decision:markdown-authority"
+      ],
+      "precision": 0.6667,
+      "expected_coverage": 1.0
+    }
+  ]
+}

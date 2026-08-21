@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+[ -n "${KB_VAULT:-}" ] || exit 0
+kb --vault "$KB_VAULT" --repo "$(git rev-parse --show-toplevel)" index >/dev/null 2>&1 || true

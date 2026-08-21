@@ -1,0 +1,18 @@
+[retrieval]
+default_budget = 500
+minimum_score = 0.24
+max_candidates = 100
+
+[lifecycle]
+promotion_threshold = 0.62
+stale_after_days = 120
+archive_after_days = 365
+
+[security]
+allow_untrusted = false
+allow_cross_repo = false
+
+[paths]
+inbox = "00-inbox"
+archive = "99-archive"
+quarantine = "98-quarantine"
