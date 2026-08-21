@@ -17,12 +17,6 @@ def verify_graph_and_parser_parity(
     artifacts: Path,
     report: IntegrationReport,
 ) -> None:
-    links_output = clean(cli.run("links", "path=Source.md").stdout)
-    for target in EXPECTED_LINKS:
-        if target not in links_output:
-            raise AssertionError(f"Obsidian outgoing links are missing {target!r}: {links_output!r}")
-    report.add("obsidian-links", "resolved, nested, and unresolved links visible")
-
     backlinks = clean(cli.run("backlinks", "path=Target.md", "format=json").stdout)
     if "Source.md" not in backlinks:
         raise AssertionError(f"Obsidian backlinks are missing Source.md: {backlinks!r}")
@@ -32,6 +26,16 @@ def verify_graph_and_parser_parity(
     if "Backlink Holder.md" not in source_backlinks:
         raise AssertionError(f"Obsidian backlinks are missing Backlink Holder.md: {source_backlinks!r}")
     report.add("obsidian-backlink-reverse-index", "Source.md <- Backlink Holder.md")
+
+    deadends = clean(cli.run("deadends").stdout)
+    if "Target.md" not in deadends or "Source.md" in deadends:
+        raise AssertionError(f"Obsidian dead-end graph view is inconsistent: {deadends!r}")
+    report.add("obsidian-deadends", "Target.md has no outgoing links; Source.md has outgoing links")
+
+    orphans = clean(cli.run("orphans").stdout)
+    if "Backlink Holder.md" not in orphans or "Source.md" in orphans:
+        raise AssertionError(f"Obsidian orphan graph view is inconsistent: {orphans!r}")
+    report.add("obsidian-orphans", "Backlink Holder.md has no incoming links; Source.md has an incoming link")
 
     unresolved = clean(cli.run("unresolved", "verbose", "format=json").stdout)
     if "Missing Contract Target" not in unresolved or "Source.md" not in unresolved:
@@ -63,6 +67,7 @@ def verify_graph_and_parser_parity(
         raise AssertionError(f"KB parser tag mismatch: {parsed.tags!r}")
     if set(snapshot.get("links", [])) != EXPECTED_LINKS:
         raise AssertionError(f"Obsidian metadata-cache link mismatch: {snapshot.get('links')!r}")
+    report.add("obsidian-outgoing-links", "resolved, nested, and unresolved links visible in metadata cache")
     obsidian_tags = set(snapshot.get("tags", []))
     raw_tags = frontmatter.get("tags", [])
     if isinstance(raw_tags, str):

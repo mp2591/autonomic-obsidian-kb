@@ -7,7 +7,7 @@ from autonomic_kb.config import KBConfig
 from autonomic_kb.index import KnowledgeIndex
 from autonomic_kb.markdown import render_note
 
-from .cli import OfficialCLI, assert_output_contains, clean, cli_content, wait_for
+from .cli import OfficialCLI, assert_output_contains, clean, cli_content, eval_snapshot, wait_for
 from .report import IntegrationReport
 
 
@@ -67,7 +67,7 @@ created-by-official-obsidian-cli-73915
     )
     wait_for(
         "linker metadata",
-        lambda: "Mutable" in clean(cli.run("links", "path=Linker.md").stdout),
+        lambda: "Mutable" in set(eval_snapshot(cli, "Linker.md").get("links", [])),
     )
     cli.run("rename", "path=Mutable.md", "name=Renamed")
     wait_for(

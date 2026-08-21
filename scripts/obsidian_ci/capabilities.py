@@ -9,8 +9,8 @@ from .cli import OfficialCLI, assert_output_contains, clean
 from .report import IntegrationReport
 
 REQUIRED_COMMANDS = {
-    "aliases", "append", "backlinks", "commands", "create", "eval", "file", "files",
-    "folder", "folders", "links", "move", "prepend", "properties", "property:read",
+    "aliases", "append", "backlinks", "commands", "create", "deadends", "eval", "file", "files",
+    "folder", "folders", "move", "orphans", "prepend", "properties", "property:read",
     "property:remove", "property:set", "read", "reload", "rename", "search",
     "search:context", "tag", "tags", "task", "tasks", "unresolved", "vault", "version",
     "dev:errors", "dev:screenshot",
