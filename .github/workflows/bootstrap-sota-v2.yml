@@ -1,0 +1,79 @@
+name: Bootstrap state-of-the-art memory v2
+
+on:
+  push:
+    branches:
+      - feat/sota-memory-v2
+    paths:
+      - .github/workflows/bootstrap-sota-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-sota-memory-v2
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out publication branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/sota-memory-v2
+          fetch-depth: 0
+
+      - name: Download and verify prepared source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://filebin.net/autonomic-obsidian-kb-v2-20260822-7f3b99d84d'
+          curl --fail --location --silent --show-error \
+            "$base/autonomic-sota-v2.tar.gz" \
+            --output "$RUNNER_TEMP/autonomic-sota-v2.tar.gz"
+          curl --fail --location --silent --show-error \
+            "$base/autonomic-sota-v2.sha256" \
+            --output "$RUNNER_TEMP/autonomic-sota-v2.sha256"
+          cd "$RUNNER_TEMP"
+          sha256sum --check autonomic-sota-v2.sha256
+          while IFS= read -r entry; do
+            case "$entry" in
+              /*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
+            esac
+          done < <(tar -tzf autonomic-sota-v2.tar.gz)
+          mkdir source
+          tar -xzf autonomic-sota-v2.tar.gz -C source
+
+      - name: Materialize exact repository snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --delete \
+            --exclude='.git/' \
+            "$RUNNER_TEMP/source/" ./
+          rm -f .github/workflows/bootstrap-sota-v2.yml
+
+      - name: Commit and push the verified source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          mapfile -d '' tracked < <(git diff --name-only -z)
+          mapfile -d '' deleted < <(git diff --name-only --diff-filter=D -z)
+          mapfile -d '' untracked < <(git ls-files --others --exclude-standard -z)
+
+          if ((${#tracked[@]})); then git add -- "${tracked[@]}"; fi
+          if ((${#deleted[@]})); then git add -u -- "${deleted[@]}"; fi
+          if ((${#untracked[@]})); then git add -- "${untracked[@]}"; fi
+
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'Prepared tree already matches the remote branch.'
+            exit 0
+          fi
+          git commit -m 'Implement evidence-driven autonomic memory v2'
+          git push origin HEAD:feat/sota-memory-v2
