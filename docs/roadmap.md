@@ -7,7 +7,7 @@ Extensions are ordered by evidence and risk, not novelty.
 - Execute validation adapters for commands, package metadata, JSON Schema/OpenAPI, and source hashes.
 - Add Git commit/PR ingestion with durable candidate extraction and user-correction capture.
 - Add retrieval feedback (`helpful`, `incorrect`, `expanded`) and utility decay.
-- Add a first-party Obsidian CLI parity checker for properties, links, backlinks, and tags.
+- Expand the real-Obsidian compatibility matrix to macOS, Windows, ARM64 Linux, and selected plugin fixtures.
 - Add branch/rebase-aware invalidation and rename detection using Git object IDs.
 - Expand benchmark corpora and include real agent traces with actual token accounting.
 

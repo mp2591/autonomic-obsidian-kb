@@ -19,3 +19,8 @@ build/
 
 # Local build preservation is intentionally not published.
 .local-build-backup/
+
+# Downloaded CI dependencies and local integration artifacts.
+.ci-cache/
+ci/obsidian/Obsidian.AppImage
+test-artifacts/

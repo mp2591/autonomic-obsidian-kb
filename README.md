@@ -198,7 +198,12 @@ PYTHONPATH=src python -m autonomic_kb --vault examples/sample-vault index --rebu
 PYTHONPATH=src python benchmarks/run.py
 ```
 
-CI runs compilation, unit tests, a CLI smoke test, and the benchmark guardrail on Python 3.11–3.13.
+CI has two independent gates:
+
+- a Python 3.11–3.13 core matrix for headless filesystem/index/retrieval behavior;
+- an isolated Ubuntu container that downloads and verifies the official Obsidian AppImage, enables CLI mode in `obsidian.json`, launches the real desktop app with `--ozone-platform=headless`, and runs bidirectional metadata, search, link, mutation, and KB-parity tests through the first-party CLI.
+
+The real-app job runs without Xvfb, `DISPLAY`, `WAYLAND_DISPLAY`, or network access after the image is built. Its logs and command transcript are uploaded on both success and failure. See [`docs/testing.md`](docs/testing.md).
 
 ## Documentation map
 
@@ -210,6 +215,7 @@ CI runs compilation, unit tests, a CLI smoke test, and the benchmark guardrail o
 - [`docs/autonomic-lifecycle.md`](docs/autonomic-lifecycle.md): learning, validation, healing, organization, optimization, and pruning loops.
 - [`docs/security.md`](docs/security.md): scope as a security boundary, prompt-injection persistence, provenance, and secret handling.
 - [`docs/benchmark.md`](docs/benchmark.md): benchmark design and interpretation.
+- [`docs/testing.md`](docs/testing.md): core and real-Obsidian CI layers, contracts, artifacts, and local reproduction.
 - [`docs/roadmap.md`](docs/roadmap.md): evidence-gated extensions.
 
 ## Guiding rule

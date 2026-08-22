@@ -91,3 +91,7 @@ Embeddings can recover paraphrases, but they add model downloads, vector storage
 - **Secret/injection candidate:** note enters quarantine and fails the trust gate.
 - **Over-budget context:** allocator lowers the disclosure layer or excludes the note.
 - **Cross-project match:** scope gate excludes it before relevance ranking.
+
+## Compatibility validation boundary
+
+The headless retrieval path and the Obsidian application adapter are tested separately. Core CI proves that Markdown authority, SQLite acceleration, scope gates, retrieval, and lifecycle operations work without Obsidian. A second release-blocking job runs the actual official Linux desktop application with `--ozone-platform=headless` and exercises the first-party CLI against the same fixture vault. The job verifies bidirectional mutations and compares Obsidian metadata-cache output with the KB parser and index. See [`testing.md`](testing.md).
