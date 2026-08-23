@@ -60,6 +60,7 @@ class KnowledgeIndex:
             # The index is explicitly disposable; this avoids fragile in-place migrations.
             self.connection.executescript("""
                 DROP TABLE IF EXISTS notes_fts;
+                DROP TABLE IF EXISTS file_manifest;
                 DROP TABLE IF EXISTS links;
                 DROP TABLE IF EXISTS usage;
                 DROP TABLE IF EXISTS decisions;
@@ -70,6 +71,9 @@ class KnowledgeIndex:
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS file_manifest (
+                path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, file_size INTEGER NOT NULL, source_hash TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY, declared_id TEXT NOT NULL, path TEXT UNIQUE NOT NULL,
                 schema_version INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, type TEXT NOT NULL,
@@ -153,35 +157,49 @@ class KnowledgeIndex:
             self.connection.execute("DELETE FROM links")
             self.connection.execute("DELETE FROM notes")
             self.connection.execute("DELETE FROM notes_fts")
+            self.connection.execute("DELETE FROM file_manifest")
         return self.index_vault(force=True)
 
     def index_vault(self, force: bool = False) -> IndexStats:
         stats = IndexStats(fts5=self.fts5)
-        existing = {row["path"]: dict(row) for row in self.connection.execute("SELECT path,source_hash,id FROM notes")}
+        existing = {row["path"]: dict(row) for row in self.connection.execute("SELECT path,source_hash,id,declared_id FROM notes")}
+        manifest = {row["path"]: dict(row) for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash FROM file_manifest")}
         seen_paths: set[str] = set()
-        pending: list[tuple[MemoryRecord, str, dict[str, Any] | None]] = []
+        pending: list[tuple[MemoryRecord, str, dict[str, Any] | None, int, int]] = []
         declared_paths: dict[str, list[str]] = {}
         for absolute in self._markdown_paths():
             relative = absolute.relative_to(self.config.vault).as_posix()
             seen_paths.add(relative)
             stats.scanned += 1
+            stat = absolute.stat()
+            current = existing.get(relative)
+            cached = manifest.get(relative)
+            if current and cached and not force and int(cached["mtime_ns"]) == stat.st_mtime_ns and int(cached["file_size"]) == stat.st_size:
+                stats.unchanged += 1
+                declared_paths.setdefault(str(current.get("declared_id") or current["id"]), []).append(relative)
+                continue
             text = absolute.read_text(encoding="utf-8", errors="replace")
             record = MemoryRecord.from_text(relative, text)
             if not record.schema_valid:
                 stats.malformed += 1
             declared_paths.setdefault(record.id, []).append(relative)
-            current = existing.get(relative)
             if current and current["source_hash"] == record.source_hash and not force:
+                self.connection.execute("INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
+                                        "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns,file_size=excluded.file_size,source_hash=excluded.source_hash",
+                                        (relative, stat.st_mtime_ns, stat.st_size, record.source_hash))
                 stats.unchanged += 1
                 continue
-            pending.append((record, record.id, current))
+            pending.append((record, record.id, current, stat.st_mtime_ns, stat.st_size))
         duplicates = {memory_id: paths for memory_id, paths in declared_paths.items() if len(paths) > 1}
         stats.duplicate_ids = sum(len(paths) - 1 for paths in duplicates.values())
         with self.connection:
-            for record, declared, current in pending:
+            for record, declared, current, mtime_ns, file_size in pending:
                 if declared in duplicates and duplicates[declared][0] != record.path:
                     record.id = f"{declared}::duplicate::{record.source_hash[:8]}"
                 self._upsert(record, declared)
+                self.connection.execute("INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
+                                        "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns,file_size=excluded.file_size,source_hash=excluded.source_hash",
+                                        (record.path, mtime_ns, file_size, record.source_hash))
                 if current:
                     stats.updated += 1
                 else:
@@ -191,6 +209,7 @@ class KnowledgeIndex:
                 self.connection.execute("DELETE FROM links WHERE source_id=?", (note_id,))
                 self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (note_id,))
                 self.connection.execute("DELETE FROM notes WHERE path=?", (relative,))
+                self.connection.execute("DELETE FROM file_manifest WHERE path=?", (relative,))
                 stats.deleted += 1
             self._resolve_link_targets()
         self.events.emit("index.completed", **stats.to_dict())
