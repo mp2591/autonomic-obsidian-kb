@@ -50,20 +50,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Initialize real-Obsidian diagnostics
         run: mkdir -p test-artifacts .ci-cache
-
       - name: Cache pinned Obsidian AppImage
         uses: actions/cache@v4
         with:
           path: .ci-cache
           key: obsidian-appimage-${{ runner.os }}-${{ env.OBSIDIAN_VERSION }}
-
       - name: Download and verify official Obsidian release asset
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -75,9 +71,7 @@ jobs:
             2>&1 | tee test-artifacts/obsidian-download.log
           cp .ci-cache/obsidian-release.json test-artifacts/
           cp .ci-cache/Obsidian.AppImage ci/obsidian/Obsidian.AppImage
-
       - uses: docker/setup-buildx-action@v3
-
       - name: Build isolated real-Obsidian test image
         uses: docker/build-push-action@v6
         with:
@@ -89,7 +83,6 @@ jobs:
             OBSIDIAN_VERSION=${{ env.OBSIDIAN_VERSION }}
           cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
           cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
-
       - name: Run Obsidian in Ozone headless mode and execute contract tests
         run: |
           docker run --rm --init \
@@ -99,7 +92,6 @@ jobs:
             -v "$PWD:/workspace:ro" \
             -v "$PWD/test-artifacts:/artifacts:rw" \
             autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
-
       - name: Upload real-Obsidian diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,11 +114,9 @@ jobs:
         with:
           ref: feat/sota-memory-v2
           fetch-depth: 0
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-
       - name: Reassemble and verify preserved source tree
         shell: bash
         run: |
@@ -142,31 +132,33 @@ jobs:
           done < <(tar -tzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz")
           mkdir "$RUNNER_TEMP/v2"
           tar -xzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz" -C "$RUNNER_TEMP/v2"
-
-      - name: Overlay actual v2 source and remove recovery scaffolding
+      - name: Overlay actual v2 source and preserve workflow files for connector cleanup
         shell: bash
         run: |
           set -euo pipefail
           rsync -a --exclude='.git/' --exclude='.pytest_cache/' "$RUNNER_TEMP/v2/" ./
           rm -rf .ci-bootstrap
-          rm -f .github/workflows/bootstrap-sota-v2.yml
-
+          rm -f examples/sample-vault/.kb/code-graph.json examples/sample-vault/.kb/traces.jsonl
+          git restore --source=HEAD -- .github/workflows/ci.yml .github/workflows/bootstrap-sota-v2.yml
+          test -f tests/test_v2_adversarial.py
+          test -f tests/test_v2_incremental.py
+          test -f docs/state-of-the-art-v2.md
+          grep -q 'test_operation_chain_detects_tampering' tests/test_v2_core.py
       - name: Install v2 package and test dependencies
         run: python -m pip install -e '.[dev]'
-
       - name: Verify complete combined repository before persistence
         shell: bash
         run: |
           set -euo pipefail
           python -m compileall -q src scripts tests
           python -m unittest discover -s tests -v
+          python -m unittest tests.test_v2_adversarial tests.test_v2_incremental -v
           pytest
           kb --vault examples/sample-vault index --rebuild
           kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
           python benchmarks/run.py
           git diff --check
-
-      - name: Commit and push actual v2 tree
+      - name: Commit and push non-workflow v2 source
         shell: bash
         run: |
           set -euo pipefail
@@ -179,6 +171,10 @@ jobs:
           if ((${#deleted[@]})); then git add -u -- "${deleted[@]}"; fi
           if ((${#untracked[@]})); then git add -- "${untracked[@]}"; fi
           git diff --cached --check
+          if git diff --cached --name-only | grep -q '^\.github/workflows/'; then
+            echo 'Workflow path unexpectedly staged' >&2
+            exit 1
+          fi
           git diff --cached --stat
           test -n "$(git diff --cached --name-only)"
           git commit -m 'Implement evidence-driven autonomic memory v2'
