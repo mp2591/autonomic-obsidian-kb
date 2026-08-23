@@ -52,9 +52,7 @@ def verify_graph_and_parser_parity(
     headings = set(snapshot.get("headings", []))
     for heading in ("Source Heading", "L0 — Pointer", "L1 — Fact", "L2 — Summary"):
         if heading not in headings:
-            raise AssertionError(
-                f"Obsidian metadata cache is missing heading {heading!r}: {sorted(headings)!r}"
-            )
+            raise AssertionError(f"Obsidian metadata cache is missing heading {heading!r}: {sorted(headings)!r}")
     report.add(
         "obsidian-metadata-cache",
         "frontmatter, links, tags, and headings queried through app.eval",
@@ -74,7 +72,5 @@ def verify_graph_and_parser_parity(
         raw_tags = [raw_tags]
     obsidian_tags.update(str(tag).lstrip("#") for tag in raw_tags)
     if not set(parsed.tags).issubset(obsidian_tags):
-        raise AssertionError(
-            f"KB/Obsidian tag parity mismatch: kb={parsed.tags!r}, obsidian={sorted(obsidian_tags)!r}"
-        )
+        raise AssertionError(f"KB/Obsidian tag parity mismatch: kb={parsed.tags!r}, obsidian={sorted(obsidian_tags)!r}")
     report.add("kb-obsidian-parser-parity", "properties, tags, links, and headings agree")

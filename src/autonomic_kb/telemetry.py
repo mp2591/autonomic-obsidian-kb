@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 from .config import KBConfig
 from .util import stable_json, utc_now
 
 FEEDBACK_KINDS = {
-    "helpful", "irrelevant", "incorrect", "stale", "incomplete", "expanded", "caused-search",
-    "caused-correction", "caused-failure", "unsafe", "missing-memory", "scope-too-broad", "scope-too-narrow",
+    "helpful",
+    "irrelevant",
+    "incorrect",
+    "stale",
+    "incomplete",
+    "expanded",
+    "caused-search",
+    "caused-correction",
+    "caused-failure",
+    "unsafe",
+    "missing-memory",
+    "scope-too-broad",
+    "scope-too-narrow",
 }
 
 
@@ -64,7 +74,9 @@ class TelemetryStore:
         config.ensure_runtime()
         self.outcome_path = config.runtime_dir / "outcomes.jsonl"
 
-    def feedback(self, retrieval_id: str, memory_id: str, kind: str, *, actor: str = "agent", notes: str = "") -> RetrievalFeedback:
+    def feedback(
+        self, retrieval_id: str, memory_id: str, kind: str, *, actor: str = "agent", notes: str = ""
+    ) -> RetrievalFeedback:
         if kind not in FEEDBACK_KINDS:
             raise ValueError(f"unsupported feedback kind {kind!r}")
         value = RetrievalFeedback(retrieval_id, memory_id, kind, actor, notes, utc_now())
@@ -98,11 +110,13 @@ class TelemetryStore:
         for task_hash, modes in groups.items():
             if "no-kb" in modes and "kb" in modes:
                 baseline, assisted = modes["no-kb"], modes["kb"]
-                paired.append({
-                    "task_hash": task_hash,
-                    "success_delta": int(bool(assisted.get("success"))) - int(bool(baseline.get("success"))),
-                    "token_delta": int(assisted.get("total_tokens", 0)) - int(baseline.get("total_tokens", 0)),
-                    "search_delta": int(assisted.get("searches", 0)) - int(baseline.get("searches", 0)),
-                    "read_delta": int(assisted.get("file_reads", 0)) - int(baseline.get("file_reads", 0)),
-                })
+                paired.append(
+                    {
+                        "task_hash": task_hash,
+                        "success_delta": int(bool(assisted.get("success"))) - int(bool(baseline.get("success"))),
+                        "token_delta": int(assisted.get("total_tokens", 0)) - int(baseline.get("total_tokens", 0)),
+                        "search_delta": int(assisted.get("searches", 0)) - int(baseline.get("searches", 0)),
+                        "read_delta": int(assisted.get("file_reads", 0)) - int(baseline.get("file_reads", 0)),
+                    }
+                )
         return {"pairs": len(paired), "items": paired}

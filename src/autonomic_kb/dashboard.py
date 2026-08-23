@@ -4,7 +4,6 @@ from typing import Any
 
 from .config import KBConfig
 from .index import KnowledgeIndex
-from .leases import LeaseStore
 from .telemetry import TelemetryStore
 from .validation import Validator
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .config import KBConfig
 from .markdown import parse_markdown
@@ -46,7 +47,7 @@ class KnowledgeIndex:
     def close(self) -> None:
         self.connection.close()
 
-    def __enter__(self) -> "KnowledgeIndex":
+    def __enter__(self) -> KnowledgeIndex:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -106,8 +107,9 @@ class KnowledgeIndex:
                 warnings INTEGER NOT NULL, report_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS rank_examples (
-                retrieval_id TEXT NOT NULL, note_id TEXT NOT NULL, feature_json TEXT NOT NULL, selected INTEGER NOT NULL,
-                label REAL, created_at TEXT NOT NULL, PRIMARY KEY(retrieval_id,note_id)
+                retrieval_id TEXT NOT NULL, note_id TEXT NOT NULL, feature_json TEXT NOT NULL,
+                selected INTEGER NOT NULL, label REAL, created_at TEXT NOT NULL,
+                PRIMARY KEY(retrieval_id,note_id)
             );
             CREATE INDEX IF NOT EXISTS idx_notes_scope ON notes(scope, repository_id, repo, project, module, branch);
             CREATE INDEX IF NOT EXISTS idx_notes_status ON notes(status);
@@ -132,7 +134,8 @@ class KnowledgeIndex:
             self.fts5 = False
         self.connection.execute("PRAGMA user_version=2")
         self.connection.execute(
-            "INSERT INTO meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            "INSERT INTO meta(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(SCHEMA_VERSION),),
         )
         self.connection.execute(
@@ -143,8 +146,14 @@ class KnowledgeIndex:
 
     def _markdown_paths(self) -> Iterable[Path]:
         ignored_parts = {
-            ".git", ".obsidian", ".kb", ".kb-evidence", ".kb-memory-events", ".kb-episodes",
-            "__pycache__", ".venv",
+            ".git",
+            ".obsidian",
+            ".kb",
+            ".kb-evidence",
+            ".kb-memory-events",
+            ".kb-episodes",
+            "__pycache__",
+            ".venv",
         }
         for path in self.config.vault.rglob("*.md"):
             relative = path.relative_to(self.config.vault)
@@ -162,8 +171,14 @@ class KnowledgeIndex:
 
     def index_vault(self, force: bool = False) -> IndexStats:
         stats = IndexStats(fts5=self.fts5)
-        existing = {row["path"]: dict(row) for row in self.connection.execute("SELECT path,source_hash,id,declared_id FROM notes")}
-        manifest = {row["path"]: dict(row) for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash FROM file_manifest")}
+        existing = {
+            row["path"]: dict(row)
+            for row in self.connection.execute("SELECT path,source_hash,id,declared_id FROM notes")
+        }
+        manifest = {
+            row["path"]: dict(row)
+            for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash FROM file_manifest")
+        }
         seen_paths: set[str] = set()
         pending: list[tuple[MemoryRecord, str, dict[str, Any] | None, int, int]] = []
         declared_paths: dict[str, list[str]] = {}
@@ -174,7 +189,13 @@ class KnowledgeIndex:
             stat = absolute.stat()
             current = existing.get(relative)
             cached = manifest.get(relative)
-            if current and cached and not force and int(cached["mtime_ns"]) == stat.st_mtime_ns and int(cached["file_size"]) == stat.st_size:
+            if (
+                current
+                and cached
+                and not force
+                and int(cached["mtime_ns"]) == stat.st_mtime_ns
+                and int(cached["file_size"]) == stat.st_size
+            ):
                 stats.unchanged += 1
                 declared_paths.setdefault(str(current.get("declared_id") or current["id"]), []).append(relative)
                 continue
@@ -184,9 +205,12 @@ class KnowledgeIndex:
                 stats.malformed += 1
             declared_paths.setdefault(record.id, []).append(relative)
             if current and current["source_hash"] == record.source_hash and not force:
-                self.connection.execute("INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
-                                        "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns,file_size=excluded.file_size,source_hash=excluded.source_hash",
-                                        (relative, stat.st_mtime_ns, stat.st_size, record.source_hash))
+                self.connection.execute(
+                    "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
+                    "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, "
+                    "file_size=excluded.file_size, source_hash=excluded.source_hash",
+                    (relative, stat.st_mtime_ns, stat.st_size, record.source_hash),
+                )
                 stats.unchanged += 1
                 continue
             pending.append((record, record.id, current, stat.st_mtime_ns, stat.st_size))
@@ -197,9 +221,12 @@ class KnowledgeIndex:
                 if declared in duplicates and duplicates[declared][0] != record.path:
                     record.id = f"{declared}::duplicate::{record.source_hash[:8]}"
                 self._upsert(record, declared)
-                self.connection.execute("INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
-                                        "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns,file_size=excluded.file_size,source_hash=excluded.source_hash",
-                                        (record.path, mtime_ns, file_size, record.source_hash))
+                self.connection.execute(
+                    "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
+                    "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, "
+                    "file_size=excluded.file_size, source_hash=excluded.source_hash",
+                    (record.path, mtime_ns, file_size, record.source_hash),
+                )
                 if current:
                     stats.updated += 1
                 else:
@@ -223,13 +250,45 @@ class KnowledgeIndex:
             self.connection.execute("DELETE FROM links WHERE source_id=?", (previous["id"],))
         layers = {level: record.layers.get(level, "") for level in range(5)}
         values = (
-            record.id, declared_id, record.path, record.schema_version, record.kind, record.title, record.type,
-            record.scope, record.status, record.summary, record.confidence, record.authority, record.repo,
-            record.repository_id, record.project, record.module, record.branch, record.created, record.updated,
-            record.validated, record.freshness, record.valid_from, record.valid_to, record.as_of_commit,
-            record.version_range, record.taint, int(record.authorized_instruction), record.token_cost, record.utility,
-            layers[0], layers[1], layers[2], layers[3], layers[4], record.body, stable_json(record.metadata),
-            record.source_hash, int(record.schema_valid), utc_now(),
+            record.id,
+            declared_id,
+            record.path,
+            record.schema_version,
+            record.kind,
+            record.title,
+            record.type,
+            record.scope,
+            record.status,
+            record.summary,
+            record.confidence,
+            record.authority,
+            record.repo,
+            record.repository_id,
+            record.project,
+            record.module,
+            record.branch,
+            record.created,
+            record.updated,
+            record.validated,
+            record.freshness,
+            record.valid_from,
+            record.valid_to,
+            record.as_of_commit,
+            record.version_range,
+            record.taint,
+            int(record.authorized_instruction),
+            record.token_cost,
+            record.utility,
+            layers[0],
+            layers[1],
+            layers[2],
+            layers[3],
+            layers[4],
+            record.body,
+            stable_json(record.metadata),
+            record.source_hash,
+            int(record.schema_valid),
+            utc_now(),
         )
         self.connection.execute(
             """INSERT INTO notes(
@@ -249,7 +308,8 @@ class KnowledgeIndex:
                 token_cost=excluded.token_cost,utility=excluded.utility,l0=excluded.l0,l1=excluded.l1,l2=excluded.l2,
                 l3=excluded.l3,l4=excluded.l4,body=excluded.body,metadata_json=excluded.metadata_json,
                 source_hash=excluded.source_hash,schema_valid=excluded.schema_valid,indexed_at=excluded.indexed_at
-            """, values,
+            """,
+            values,
         )
         self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (record.id,))
         self.connection.execute(
@@ -271,7 +331,8 @@ class KnowledgeIndex:
                 if isinstance(targets, list):
                     for target in targets:
                         self.connection.execute(
-                            "INSERT OR IGNORE INTO links(source_id,target,target_id,relation,provenance) VALUES(?,?,?,?,?)",
+                            "INSERT OR IGNORE INTO links"
+                            "(source_id,target,target_id,relation,provenance) VALUES(?,?,?,?,?)",
                             (record.id, str(target), "", str(relation).replace("_", "-"), "frontmatter"),
                         )
 
@@ -279,7 +340,14 @@ class KnowledgeIndex:
         notes = list(self.connection.execute("SELECT id,declared_id,path,title FROM notes"))
         by_key: dict[str, str] = {}
         for row in notes:
-            keys = {row["id"], row["declared_id"], row["path"], Path(row["path"]).with_suffix("").as_posix(), row["title"], Path(row["path"]).stem}
+            keys = {
+                row["id"],
+                row["declared_id"],
+                row["path"],
+                Path(row["path"]).with_suffix("").as_posix(),
+                row["title"],
+                Path(row["path"]).stem,
+            }
             for key in keys:
                 if key and key not in by_key:
                     by_key[str(key)] = row["id"]
@@ -295,7 +363,8 @@ class KnowledgeIndex:
         row = self.connection.execute(
             "SELECT n.*,COALESCE(u.uses,0) AS uses,u.last_used FROM notes n "
             "LEFT JOIN (SELECT note_id,COUNT(*) uses,MAX(retrieved_at) last_used FROM usage GROUP BY note_id) u "
-            "ON n.id=u.note_id WHERE n.id=? OR n.declared_id=? LIMIT 1", (memory_id, memory_id),
+            "ON n.id=u.note_id WHERE n.id=? OR n.declared_id=? LIMIT 1",
+            (memory_id, memory_id),
         ).fetchone()
         return self._row(row) if row else None
 
@@ -306,7 +375,9 @@ class KnowledgeIndex:
     def all_notes(self, statuses: set[str] | None = None) -> list[dict[str, Any]]:
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
-            rows = self.connection.execute(f"SELECT * FROM notes WHERE status IN ({placeholders}) ORDER BY path", tuple(statuses)).fetchall()
+            rows = self.connection.execute(
+                f"SELECT * FROM notes WHERE status IN ({placeholders}) ORDER BY path", tuple(statuses)
+            ).fetchall()
         else:
             rows = self.connection.execute("SELECT * FROM notes ORDER BY path").fetchall()
         return [self._row(row) for row in rows]
@@ -322,7 +393,11 @@ class KnowledgeIndex:
         ).fetchall()
         result = [self._row(row) for row in rows]
         for position, item in enumerate(result):
-            item["exact"] = 1.0 if q in {item["id"].lower(), item["declared_id"].lower(), item["path"].lower(), item["title"].lower()} else 0.75
+            item["exact"] = (
+                1.0
+                if q in {item["id"].lower(), item["declared_id"].lower(), item["path"].lower(), item["title"].lower()}
+                else 0.75
+            )
             item["rank_exact"] = position + 1
         return result
 
@@ -335,7 +410,8 @@ class KnowledgeIndex:
             try:
                 matches = self.connection.execute(
                     "SELECT note_id,bm25(notes_fts,3.0,2.6,2.3,1.7,1.0,0.7) AS bm25_rank "
-                    "FROM notes_fts WHERE notes_fts MATCH ? ORDER BY bm25_rank LIMIT ?", (fts_query, limit),
+                    "FROM notes_fts WHERE notes_fts MATCH ? ORDER BY bm25_rank LIMIT ?",
+                    (fts_query, limit),
                 ).fetchall()
             except sqlite3.OperationalError:
                 matches = []
@@ -407,49 +483,80 @@ class KnowledgeIndex:
         now = utc_now()
         self.connection.executemany(
             "INSERT INTO decisions(retrieval_id,note_id,selected,score,reason,created_at) VALUES(?,?,?,?,?,?)",
-            [(retrieval_id, item["id"], int(item.get("selected", False)), float(item.get("score", 0.0)),
-              "; ".join(item.get("reasons", [])), now) for item in decisions],
+            [
+                (
+                    retrieval_id,
+                    item["id"],
+                    int(item.get("selected", False)),
+                    float(item.get("score", 0.0)),
+                    "; ".join(item.get("reasons", [])),
+                    now,
+                )
+                for item in decisions
+            ],
         )
         self.connection.commit()
 
     def record_rank_example(self, retrieval_id: str, note_id: str, features: dict[str, float], selected: bool) -> None:
         self.connection.execute(
-            "INSERT INTO rank_examples(retrieval_id,note_id,feature_json,selected,label,created_at) VALUES(?,?,?,?,NULL,?) "
-            "ON CONFLICT(retrieval_id,note_id) DO UPDATE SET feature_json=excluded.feature_json,selected=excluded.selected",
+            "INSERT INTO rank_examples"
+            "(retrieval_id,note_id,feature_json,selected,label,created_at) VALUES(?,?,?,?,NULL,?) "
+            "ON CONFLICT(retrieval_id,note_id) DO UPDATE SET "
+            "feature_json=excluded.feature_json, selected=excluded.selected",
             (retrieval_id, note_id, stable_json(features), int(selected), utc_now()),
         )
         self.connection.commit()
 
     def label_rank_example(self, retrieval_id: str, note_id: str, label: float) -> None:
-        self.connection.execute("UPDATE rank_examples SET label=? WHERE retrieval_id=? AND note_id=?",
-                                (float(label), retrieval_id, note_id))
+        self.connection.execute(
+            "UPDATE rank_examples SET label=? WHERE retrieval_id=? AND note_id=?", (float(label), retrieval_id, note_id)
+        )
         self.connection.commit()
 
     def record_usage(self, retrieval_id: str, task_hash: str, items: list[dict[str, Any]]) -> None:
         now = utc_now()
         self.connection.executemany(
-            "INSERT INTO usage(note_id,retrieval_id,task_hash,retrieved_at,rank,score,tokens,layer) VALUES(?,?,?,?,?,?,?,?)",
-            [(item["id"], retrieval_id, task_hash, now, rank, item["score"], item["tokens"], item["layer"])
-             for rank, item in enumerate(items, 1)],
+            "INSERT INTO usage"
+            "(note_id,retrieval_id,task_hash,retrieved_at,rank,score,tokens,layer) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            [
+                (item["id"], retrieval_id, task_hash, now, rank, item["score"], item["tokens"], item["layer"])
+                for rank, item in enumerate(items, 1)
+            ],
         )
         self.connection.commit()
 
     def why(self, memory_id: str) -> dict[str, Any]:
         note = self.get(memory_id)
         rows = self.connection.execute(
-            "SELECT retrieval_id,selected,score,reason,created_at FROM decisions WHERE note_id=? ORDER BY id DESC LIMIT 10",
+            "SELECT retrieval_id,selected,score,reason,created_at FROM decisions "
+            "WHERE note_id=? ORDER BY id DESC LIMIT 10",
             (note["id"] if note else memory_id,),
         ).fetchall()
         return {"memory": note, "recent_decisions": [dict(row) for row in rows]}
 
     def stats(self) -> dict[str, Any]:
         total = self.connection.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
-        by_status = {row[0]: row[1] for row in self.connection.execute("SELECT status,COUNT(*) FROM notes GROUP BY status")}
-        by_scope = {row[0]: row[1] for row in self.connection.execute("SELECT scope,COUNT(*) FROM notes GROUP BY scope")}
-        use = self.connection.execute("SELECT COUNT(*),COALESCE(SUM(tokens),0),COUNT(DISTINCT retrieval_id) FROM usage").fetchone()
-        return {"notes": total, "by_status": by_status, "by_scope": by_scope, "retrieved_items": use[0],
-                "retrieved_tokens": use[1], "retrievals": use[2], "fts5": self.fts5,
-                "schema_version": SCHEMA_VERSION, "index_path": str(self.config.index_path)}
+        by_status = {
+            row[0]: row[1] for row in self.connection.execute("SELECT status,COUNT(*) FROM notes GROUP BY status")
+        }
+        by_scope = {
+            row[0]: row[1] for row in self.connection.execute("SELECT scope,COUNT(*) FROM notes GROUP BY scope")
+        }
+        use = self.connection.execute(
+            "SELECT COUNT(*),COALESCE(SUM(tokens),0),COUNT(DISTINCT retrieval_id) FROM usage"
+        ).fetchone()
+        return {
+            "notes": total,
+            "by_status": by_status,
+            "by_scope": by_scope,
+            "retrieved_items": use[0],
+            "retrieved_tokens": use[1],
+            "retrievals": use[2],
+            "fts5": self.fts5,
+            "schema_version": SCHEMA_VERSION,
+            "index_path": str(self.config.index_path),
+        }
 
     def save_validation(self, report: dict[str, Any]) -> None:
         self.connection.execute(

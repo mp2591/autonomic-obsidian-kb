@@ -34,9 +34,7 @@ id: kb:repository:fact:cli-created
 
 created-by-official-obsidian-cli-73915
 """.replace("\n ", "\n")
-    cli.run(
-        "create", "path=generated/cli-created.md", f"content={cli_content(cli_created)}", "overwrite"
-    )
+    cli.run("create", "path=generated/cli-created.md", f"content={cli_content(cli_created)}", "overwrite")
     wait_for("CLI-created file", lambda: vault.joinpath("generated/cli-created.md").exists())
     assert_output_contains(
         cli.run("read", "path=generated/cli-created.md"),
@@ -44,7 +42,10 @@ created-by-official-obsidian-cli-73915
         "CLI-created note",
     )
     cli.run(
-        "property:set", "name=integration_status", "value=passed", "type=text",
+        "property:set",
+        "name=integration_status",
+        "value=passed",
+        "type=text",
         "path=generated/cli-created.md",
     )
     assert_output_contains(
@@ -129,7 +130,9 @@ Links to [[Mutable]].
 
     def obsidian_sees_kb_note() -> bool:
         result = cli.run(
-            "search", "query=created-by-kb-observed-by-obsidian-19642", "format=json",
+            "search",
+            "query=created-by-kb-observed-by-obsidian-19642",
+            "format=json",
             check=False,
         )
         return result.returncode == 0 and "generated/kb-created.md" in clean(result.stdout)
@@ -156,9 +159,7 @@ Links to [[Mutable]].
                 raise AssertionError(f"KB index missed post-startup note {memory_id}")
         cli_record = index.get("kb:repository:fact:cli-created")
         if cli_record and cli_record["metadata"].get("integration_status") != "passed":
-            raise AssertionError(
-                f"KB parser missed Obsidian property mutation: {cli_record['metadata']!r}"
-            )
+            raise AssertionError(f"KB parser missed Obsidian property mutation: {cli_record['metadata']!r}")
         mutable_record = index.get("kb:repository:fact:mutable")
         if mutable_record and mutable_record["path"] != "Renamed.md":
             raise AssertionError(f"KB index missed Obsidian rename path: {mutable_record['path']!r}")

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any
 
 from .config import KBConfig
@@ -41,10 +40,16 @@ class EpisodeStore:
     def capture(self, task: str, **values: Any) -> Episode:
         episode = Episode(episode_id=f"episode:{uuid.uuid4().hex}", task=task, created_at=utc_now(), **values)
         raw = json.dumps(episode.to_dict(), sort_keys=True, ensure_ascii=False)
-        evidence = self.evidence.put("episode", raw, subject=episode.episode_id,
-                                     repository_id=episode.repository_id, commit=episode.commit, producer="episode-store")
+        evidence = self.evidence.put(
+            "episode",
+            raw,
+            subject=episode.episode_id,
+            repository_id=episode.repository_id,
+            commit=episode.commit,
+            producer="episode-store",
+        )
         episode.evidence.append(evidence.evidence_id)
-        destination = self.config.episode_dir / episode.created_at[:10] / f"{episode.episode_id.split(':',1)[1]}.json"
+        destination = self.config.episode_dir / episode.created_at[:10] / f"{episode.episode_id.split(':', 1)[1]}.json"
         atomic_write(destination, json.dumps(episode.to_dict(), indent=2, sort_keys=True) + "\n")
         return episode
 
@@ -61,7 +66,9 @@ class EpisodeStore:
         target = sha256_text(signature.lower())[:16]
         count = 0
         for episode in self.all():
-            corpus = "\n".join([episode.task, *episode.observations, *episode.failed_hypotheses, *episode.successful_actions])
+            corpus = "\n".join(
+                [episode.task, *episode.observations, *episode.failed_hypotheses, *episode.successful_actions]
+            )
             if sha256_text(corpus.lower())[:16] == target or signature.lower() in corpus.lower():
                 count += 1
         return count

@@ -6,7 +6,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration\n\n[retrieval]\ndefault_budget = 1000\nminimum_score = 0.28\nmax_candidates = 200\nroutes = [\"exact\", \"lexical\", \"graph\", \"temporal\"]\nrrf_k = 60\n\n[lifecycle]\npromotion_threshold = 0.62\nstale_after_days = 120\narchive_after_days = 365\nrecurrence_threshold = 2\n\n[security]\nallow_untrusted = false\nallow_cross_repo = false\nrequire_instruction_authorization = true\n\n[paths]\ninbox = \"00-inbox\"\narchive = \"99-archive\"\nquarantine = \"98-quarantine\"\n\n[telemetry]\nenabled = true\n"""
+DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration
+
+[retrieval]
+default_budget = 1000
+minimum_score = 0.28
+max_candidates = 200
+routes = ["exact", "lexical", "graph", "temporal"]
+rrf_k = 60
+
+[lifecycle]
+promotion_threshold = 0.62
+stale_after_days = 120
+archive_after_days = 365
+recurrence_threshold = 2
+
+[security]
+allow_untrusted = false
+allow_cross_repo = false
+require_instruction_authorization = true
+
+[paths]
+inbox = "00-inbox"
+archive = "99-archive"
+quarantine = "98-quarantine"
+
+[telemetry]
+enabled = true
+"""
 
 
 @dataclass(slots=True)
@@ -85,7 +112,7 @@ class KBConfig:
             path.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> "KBConfig":
+    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> KBConfig:
         vault_path = find_vault(vault)
         repo_path = Path(repo).expanduser().resolve() if repo else find_repo(vault_path)
         raw: dict[str, Any] = {}
@@ -120,7 +147,9 @@ class KBConfig:
             archive_dir=str(paths.get("archive", "99-archive")),
             quarantine_dir=str(paths.get("quarantine", "98-quarantine")),
             telemetry_enabled=bool(telemetry.get("enabled", True)),
-            extra={k: v for k, v in raw.items() if k not in {"retrieval", "lifecycle", "security", "paths", "telemetry"}},
+            extra={
+                k: v for k, v in raw.items() if k not in {"retrieval", "lifecycle", "security", "paths", "telemetry"}
+            },
         )
         config.ensure_runtime()
         return config

@@ -42,7 +42,7 @@ def canonical_remote(value: str) -> str:
     value = re.sub(r"\.git$", "", value)
     if value.startswith("git@") and ":" in value:
         host, path = value.split(":", 1)
-        value = f"https://{host.split('@',1)[1]}/{path}"
+        value = f"https://{host.split('@', 1)[1]}/{path}"
     return value.rstrip("/").lower()
 
 
@@ -80,10 +80,18 @@ def inspect_git(start: str | Path | None) -> GitContext:
             renamed[fields[1]] = fields[2]
     changed = sorted(set(staged) | set(unstaged) | set(untracked) | set(renamed.values()))
     return GitContext(
-        root=root, branch=branch, upstream=upstream, remote=remote,
-        repository_id=repository_identity(root_path, remote), head=head, merge_base=merge_base,
-        changed_paths=changed, staged_paths=staged, unstaged_paths=unstaged,
-        untracked_paths=untracked, renamed_paths=renamed,
+        root=root,
+        branch=branch,
+        upstream=upstream,
+        remote=remote,
+        repository_id=repository_identity(root_path, remote),
+        head=head,
+        merge_base=merge_base,
+        changed_paths=changed,
+        staged_paths=staged,
+        unstaged_paths=unstaged,
+        untracked_paths=untracked,
+        renamed_paths=renamed,
     )
 
 
@@ -98,7 +106,9 @@ def is_ancestor(start: str | Path, ancestor: str, descendant: str) -> bool:
         return False
     cwd = Path(start).resolve()
     try:
-        result = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=cwd, timeout=3, check=False)
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant], cwd=cwd, timeout=3, check=False
+        )
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0

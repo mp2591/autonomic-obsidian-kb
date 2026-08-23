@@ -2,21 +2,34 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 _SECRET_PATTERNS = {
     "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
     "github-token": re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}\b"),
     "aws-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
-    "generic-secret": re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_./+\-=]{12,}"),
+    "generic-secret": re.compile(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_./+\-=]{12,}"
+    ),
 }
 _INJECTION_PATTERNS = {
-    "instruction-override": re.compile(r"(?i)\b(?:ignore|disregard|forget|override).{0,32}(?:previous|prior|system|developer|safety|policy) instructions?\b"),
-    "prompt-exfiltration": re.compile(r"(?i)\b(?:reveal|print|dump|show|exfiltrate|send).{0,45}(?:system prompt|developer message|secrets?|credentials?|tokens?)\b"),
+    "instruction-override": re.compile(
+        r"(?i)\b(?:ignore|disregard|forget|override).{0,32}"
+        r"(?:previous|prior|system|developer|safety|policy) instructions?\b"
+    ),
+    "prompt-exfiltration": re.compile(
+        r"(?i)\b(?:reveal|print|dump|show|exfiltrate|send).{0,45}"
+        r"(?:system prompt|developer message|secrets?|credentials?|tokens?)\b"
+    ),
     "role-forgery": re.compile(r"(?im)^\s*(?:system|developer|assistant|tool)\s*:\s*"),
-    "tool-coercion": re.compile(r"(?i)\b(?:must|always|immediately|silently) (?:run|call|invoke|execute).{0,40}(?:shell|tool|command|curl|powershell|bash)\b"),
-    "memory-persistence": re.compile(r"(?i)\b(?:remember|persist|store|write).{0,40}(?:instruction|rule|secret|credential|prompt).{0,30}(?:future|later|subsequent|permanent)"),
+    "tool-coercion": re.compile(
+        r"(?i)\b(?:must|always|immediately|silently) "
+        r"(?:run|call|invoke|execute).{0,40}(?:shell|tool|command|curl|powershell|bash)\b"
+    ),
+    "memory-persistence": re.compile(
+        r"(?i)\b(?:remember|persist|store|write).{0,40}(?:instruction|rule|secret|credential|prompt).{0,30}(?:future|later|subsequent|permanent)"
+    ),
 }
 
 TRUSTED_AUTHORITIES = {"source-of-truth", "authoritative", "verified", "user-corrected"}
@@ -38,11 +51,11 @@ def scan_content(text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     for name, pattern in _SECRET_PATTERNS.items():
         for match in pattern.finditer(text):
-            excerpt = text[max(0, match.start() - 16): match.end() + 16]
+            excerpt = text[max(0, match.start() - 16) : match.end() + 16]
             findings.append(SecurityFinding("secret", name, _redact(excerpt), "critical"))
     for name, pattern in _INJECTION_PATTERNS.items():
         for match in pattern.finditer(text):
-            excerpt = text[max(0, match.start() - 24): match.end() + 50]
+            excerpt = text[max(0, match.start() - 24) : match.end() + 50]
             findings.append(SecurityFinding("prompt-injection", name, excerpt.replace("\n", " ")[:200], "high"))
     entropy = _high_entropy_assignments(text)
     findings.extend(entropy)
@@ -87,8 +100,14 @@ def instruction_authorized(memory_type: str, authority: str, authorized: bool, t
 
 
 def trust_gate(
-    status: str, authority: str, confidence: float, allow_untrusted: bool = False, *, memory_type: str = "fact",
-    authorized_instruction: bool = False, taint: str = "unknown",
+    status: str,
+    authority: str,
+    confidence: float,
+    allow_untrusted: bool = False,
+    *,
+    memory_type: str = "fact",
+    authorized_instruction: bool = False,
+    taint: str = "unknown",
 ) -> tuple[bool, str]:
     if status in {"quarantined", "archived", "superseded", "retracted"}:
         return False, f"status={status}"

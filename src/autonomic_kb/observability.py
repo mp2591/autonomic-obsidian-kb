@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Iterator
+from typing import Any
 
 from .util import stable_json, utc_now
 

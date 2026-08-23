@@ -17,7 +17,7 @@ import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -122,7 +122,7 @@ def write_metadata(asset: ReleaseAsset, output: Path, metadata_path: Path) -> No
         **asset.to_dict(),
         "local_path": str(output),
         "verified_sha256": sha256_file(output),
-        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+        "downloaded_at": datetime.now(UTC).isoformat(),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

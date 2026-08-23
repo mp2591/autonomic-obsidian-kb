@@ -11,19 +11,40 @@ def graph_data(index: KnowledgeIndex, include_archived: bool = False) -> dict[st
     statuses = None if include_archived else {"active", "inbox", "stale", "conflicted"}
     notes = index.all_notes(statuses)
     allowed = {note["id"] for note in notes}
-    nodes = [{"id": note["declared_id"] or note["id"], "internal_id": note["id"], "path": note["path"],
-              "title": note["title"], "kind": note.get("kind", "semantic"), "type": note["type"],
-              "scope": note["scope"], "status": note["status"]} for note in notes]
+    nodes = [
+        {
+            "id": note["declared_id"] or note["id"],
+            "internal_id": note["id"],
+            "path": note["path"],
+            "title": note["title"],
+            "kind": note.get("kind", "semantic"),
+            "type": note["type"],
+            "scope": note["scope"],
+            "status": note["status"],
+        }
+        for note in notes
+    ]
     edges = []
-    for row in index.connection.execute("SELECT source_id,target,target_id,relation,provenance FROM links ORDER BY source_id,target"):
+    for row in index.connection.execute(
+        "SELECT source_id,target,target_id,relation,provenance FROM links ORDER BY source_id,target"
+    ):
         if row["source_id"] in allowed:
-            edges.append({"source": row["source_id"], "target": row["target_id"] or row["target"],
-                          "raw_target": row["target"], "relation": row["relation"], "provenance": row["provenance"],
-                          "resolved": bool(row["target_id"])})
+            edges.append(
+                {
+                    "source": row["source_id"],
+                    "target": row["target_id"] or row["target"],
+                    "raw_target": row["target"],
+                    "relation": row["relation"],
+                    "provenance": row["provenance"],
+                    "resolved": bool(row["target_id"]),
+                }
+            )
     return {"nodes": nodes, "edges": edges}
 
 
-def personalized_pagerank(index: KnowledgeIndex, seeds: list[str], damping: float = 0.85, iterations: int = 20) -> list[dict[str, Any]]:
+def personalized_pagerank(
+    index: KnowledgeIndex, seeds: list[str], damping: float = 0.85, iterations: int = 20
+) -> list[dict[str, Any]]:
     data = graph_data(index)
     ids = {node["internal_id"] for node in data["nodes"]}
     seed_ids = {index.get(seed)["id"] for seed in seeds if index.get(seed)}
@@ -58,7 +79,8 @@ def personalized_pagerank(index: KnowledgeIndex, seeds: list[str], damping: floa
 
 def render_graph(index: KnowledgeIndex, format: str = "json", include_archived: bool = False) -> str:
     data = graph_data(index, include_archived)
-    if format == "json": return json.dumps(data, indent=2)
+    if format == "json":
+        return json.dumps(data, indent=2)
     if format == "dot":
         lines = ["digraph knowledge {", "  rankdir=LR;"]
         aliases = {node["internal_id"]: node["id"] for node in data["nodes"]}
@@ -68,7 +90,8 @@ def render_graph(index: KnowledgeIndex, format: str = "json", include_archived: 
         for edge in data["edges"]:
             relation = str(edge["relation"]).replace('"', '\\"')
             lines.append(f'  "{edge["source"]}" -> "{edge["target"]}" [label="{relation}"];')
-        lines.append("}"); return "\n".join(lines)
+        lines.append("}")
+        return "\n".join(lines)
     if format == "mermaid":
         lines = ["graph LR"]
         aliases = {node["internal_id"]: f"N{i}" for i, node in enumerate(data["nodes"])}
@@ -76,8 +99,8 @@ def render_graph(index: KnowledgeIndex, format: str = "json", include_archived: 
             label = str(node["title"]).replace('"', "'")
             lines.append(f'  {aliases[node["internal_id"]]}["{label}"]')
         for edge in data["edges"]:
-            source = aliases.get(edge["source"], f'X{abs(hash(edge["source"]))}')
-            target = aliases.get(edge["target"], f'X{abs(hash(edge["target"]))}')
+            source = aliases.get(edge["source"], f"X{abs(hash(edge['source']))}")
+            target = aliases.get(edge["target"], f"X{abs(hash(edge['target']))}")
             lines.append(f'  {source} -- "{edge["relation"]}" --> {target}')
         return "\n".join(lines)
     raise ValueError(f"unsupported graph format: {format}")

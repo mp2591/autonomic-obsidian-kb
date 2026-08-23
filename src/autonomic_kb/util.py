@@ -6,15 +6,16 @@ import math
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_./:+-]+")
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -30,11 +31,11 @@ def age_days(value: str | None) -> float:
     parsed = parse_time(value)
     if not parsed:
         return 10_000.0
-    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds() / 86_400)
+    return max(0.0, (datetime.now(UTC) - parsed).total_seconds() / 86_400)
 
 
 def is_time_active(valid_from: str = "", valid_to: str = "", *, at: datetime | None = None) -> bool:
-    at = at or datetime.now(timezone.utc)
+    at = at or datetime.now(UTC)
     start = parse_time(valid_from)
     end = parse_time(valid_to)
     return (not start or start <= at) and (not end or at < end)
@@ -99,9 +100,38 @@ def stable_json(value: Any) -> str:
 
 def terms(text: str, minimum: int = 2) -> list[str]:
     stop = {
-        "a", "an", "and", "are", "as", "at", "be", "by", "do", "for", "from", "how",
-        "i", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "use",
-        "we", "what", "when", "where", "which", "with", "you", "your",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "do",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "use",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "with",
+        "you",
+        "your",
     }
     seen: set[str] = set()
     result: list[str] = []

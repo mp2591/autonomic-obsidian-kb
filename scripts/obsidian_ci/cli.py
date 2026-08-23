@@ -5,10 +5,12 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
 
 class OfficialCLI:
     def __init__(self, binary: str, vault_name: str, transcript: Path):
