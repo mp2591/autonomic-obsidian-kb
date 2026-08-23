@@ -1,4 +1,4 @@
-name: Bootstrap state-of-the-art memory v2
+name: Materialize state-of-the-art memory v2
 
 on:
   push:
@@ -11,13 +11,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: bootstrap-sota-memory-v2
+  group: materialize-sota-memory-v2
   cancel-in-progress: false
 
 jobs:
   materialize:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out publication branch
         uses: actions/checkout@v4
@@ -25,37 +25,44 @@ jobs:
           ref: feat/sota-memory-v2
           fetch-depth: 0
 
-      - name: Download and verify prepared source tree
+      - name: Reassemble and verify preserved source tree
         shell: bash
         run: |
           set -euo pipefail
-          base='https://filebin.net/autonomic-obsidian-kb-v2-20260822-7f3b99d84d'
-          curl --fail --location --silent --show-error \
-            "$base/autonomic-sota-v2.tar.gz" \
-            --output "$RUNNER_TEMP/autonomic-sota-v2.tar.gz"
-          curl --fail --location --silent --show-error \
-            "$base/autonomic-sota-v2.sha256" \
-            --output "$RUNNER_TEMP/autonomic-sota-v2.sha256"
-          cd "$RUNNER_TEMP"
-          sha256sum --check autonomic-sota-v2.sha256
+          cat .ci-bootstrap/part-*.b64 | base64 --decode > "$RUNNER_TEMP/sota-v2-overlay.tar.gz"
+          echo "0c390ca9e64dd1701823f28f8909c64037b6141724fcaa76eacd16f67cf625b3  $RUNNER_TEMP/sota-v2-overlay.tar.gz" | sha256sum --check
           while IFS= read -r entry; do
+            entry="${entry#./}"
             case "$entry" in
-              /*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
+              ""|/*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
             esac
-          done < <(tar -tzf autonomic-sota-v2.tar.gz)
-          mkdir source
-          tar -xzf autonomic-sota-v2.tar.gz -C source
+          done < <(tar -tzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz")
+          mkdir "$RUNNER_TEMP/v2"
+          tar -xzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz" -C "$RUNNER_TEMP/v2"
 
-      - name: Materialize exact repository snapshot
+      - name: Overlay actual v2 source
         shell: bash
         run: |
           set -euo pipefail
-          rsync -a --delete \
-            --exclude='.git/' \
-            "$RUNNER_TEMP/source/" ./
+          rsync -a --exclude='.git/' --exclude='.pytest_cache/' "$RUNNER_TEMP/v2/" ./
+          rm -rf .ci-bootstrap
           rm -f .github/workflows/bootstrap-sota-v2.yml
 
-      - name: Commit and push the verified source tree
+      - name: Verify materialized source before persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -e '.[dev]'
+          python -m compileall -q src scripts tests
+          python -m unittest discover -s tests -v
+          pytest
+          ruff check src tests scripts
+          kb --vault examples/sample-vault index --rebuild
+          kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
+          python benchmarks/run.py
+          git diff --check
+
+      - name: Commit and push actual v2 tree
         shell: bash
         run: |
           set -euo pipefail
@@ -72,7 +79,7 @@ jobs:
 
           git diff --cached --check
           if git diff --cached --quiet; then
-            echo 'Prepared tree already matches the remote branch.'
+            echo 'No materialization changes.'
             exit 0
           fi
           git commit -m 'Implement evidence-driven autonomic memory v2'
