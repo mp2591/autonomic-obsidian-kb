@@ -29,16 +29,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install package and test dependencies
+        run: python -m pip install -e '.[dev]'
       - name: Compile
-        run: PYTHONPATH=src python -m compileall -q src scripts tests
+        run: python -m compileall -q src scripts tests
       - name: Unit tests
-        run: PYTHONPATH=src python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -v
+      - name: Pytest compatibility
+        run: pytest
       - name: CLI smoke test
         run: |
-          PYTHONPATH=src python -m autonomic_kb --vault examples/sample-vault index --rebuild
-          PYTHONPATH=src python -m autonomic_kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
+          kb --vault examples/sample-vault index --rebuild
+          kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
       - name: Benchmark guardrail
-        run: PYTHONPATH=src python benchmarks/run.py
+        run: python benchmarks/run.py
 
   real-obsidian:
     name: Real Obsidian desktop + official CLI
@@ -83,8 +87,8 @@ jobs:
           tags: autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
           build-args: |
             OBSIDIAN_VERSION=${{ env.OBSIDIAN_VERSION }}
-          cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}
-          cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}
+          cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
+          cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
 
       - name: Run Obsidian in Ozone headless mode and execute contract tests
         run: |
@@ -104,3 +108,78 @@ jobs:
           path: test-artifacts
           if-no-files-found: error
           retention-days: 14
+
+  materialize-v2:
+    name: Materialize and verify actual v2 source
+    if: github.event_name == 'pull_request' && github.head_ref == 'feat/sota-memory-v2'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out publication branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/sota-memory-v2
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Reassemble and verify preserved source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .ci-bootstrap/part-*.b64 | base64 --decode > "$RUNNER_TEMP/sota-v2-overlay.tar.gz"
+          echo "0c390ca9e64dd1701823f28f8909c64037b6141724fcaa76eacd16f67cf625b3  $RUNNER_TEMP/sota-v2-overlay.tar.gz" | sha256sum --check
+          while IFS= read -r entry; do
+            entry="${entry#./}"
+            case "$entry" in
+              ""|/*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
+            esac
+          done < <(tar -tzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz")
+          mkdir "$RUNNER_TEMP/v2"
+          tar -xzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz" -C "$RUNNER_TEMP/v2"
+
+      - name: Overlay actual v2 source and remove recovery scaffolding
+        shell: bash
+        run: |
+          set -euo pipefail
+          rsync -a --exclude='.git/' --exclude='.pytest_cache/' "$RUNNER_TEMP/v2/" ./
+          rm -rf .ci-bootstrap
+          rm -f .github/workflows/bootstrap-sota-v2.yml
+
+      - name: Install v2 package and test dependencies
+        run: python -m pip install -e '.[dev]'
+
+      - name: Verify complete combined repository before persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src scripts tests
+          python -m unittest discover -s tests -v
+          pytest
+          ruff check src tests scripts
+          kb --vault examples/sample-vault index --rebuild
+          kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
+          python benchmarks/run.py
+          git diff --check
+
+      - name: Commit and push actual v2 tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mapfile -d '' tracked < <(git diff --name-only -z)
+          mapfile -d '' deleted < <(git diff --name-only --diff-filter=D -z)
+          mapfile -d '' untracked < <(git ls-files --others --exclude-standard -z)
+          if ((${#tracked[@]})); then git add -- "${tracked[@]}"; fi
+          if ((${#deleted[@]})); then git add -u -- "${deleted[@]}"; fi
+          if ((${#untracked[@]})); then git add -- "${untracked[@]}"; fi
+          git diff --cached --check
+          git diff --cached --stat
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'Implement evidence-driven autonomic memory v2'
+          git push origin HEAD:feat/sota-memory-v2
