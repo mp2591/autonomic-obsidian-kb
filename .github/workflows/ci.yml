@@ -50,20 +50,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Initialize real-Obsidian diagnostics
         run: mkdir -p test-artifacts .ci-cache
-
       - name: Cache pinned Obsidian AppImage
         uses: actions/cache@v4
         with:
           path: .ci-cache
           key: obsidian-appimage-${{ runner.os }}-${{ env.OBSIDIAN_VERSION }}
-
       - name: Download and verify official Obsidian release asset
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -75,9 +71,7 @@ jobs:
             2>&1 | tee test-artifacts/obsidian-download.log
           cp .ci-cache/obsidian-release.json test-artifacts/
           cp .ci-cache/Obsidian.AppImage ci/obsidian/Obsidian.AppImage
-
       - uses: docker/setup-buildx-action@v3
-
       - name: Build isolated real-Obsidian test image
         uses: docker/build-push-action@v6
         with:
@@ -90,7 +84,6 @@ jobs:
             AUTONOMIC_INSTALL_SPEC=/workspace[dev]
           cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
           cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
-
       - name: Run Obsidian in Ozone headless mode and execute contract tests
         run: |
           docker run --rm --init \
@@ -100,7 +93,6 @@ jobs:
             -v "$PWD:/workspace:ro" \
             -v "$PWD/test-artifacts:/artifacts:rw" \
             autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
-
       - name: Upload real-Obsidian diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -110,8 +102,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  repair-v2-files:
-    name: Repair exact preserved v2 index and core tests
+  repair-index-v2:
+    name: Repair exact preserved v2 incremental index
     if: github.event_name == 'pull_request' && github.head_ref == 'feat/sota-memory-v2'
     runs-on: ubuntu-24.04
     permissions:
@@ -124,7 +116,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Decode checksum-verified preserved files
+      - name: Decode checksum-verified preserved index
         shell: bash
         run: |
           set -euo pipefail
@@ -133,37 +125,33 @@ jobs:
           import base64, gzip, hashlib, re
           workflow = Path('.github/workflows/repair-v2-files.yml').read_text(encoding='utf-8')
           blocks = re.findall(r"<<'B64'\n(.*?)\nB64", workflow, re.S)
-          if len(blocks) != 2:
-              raise SystemExit(f'expected 2 embedded payloads, found {len(blocks)}')
-          targets = [
-              ('src/autonomic_kb/index.py', '1152b53ce80cb1520559f84d9239e9c5de95ba04d4be67510c446ef9fcd993cd'),
-              ('tests/test_v2_core.py', '3dc270cc5376fa2cbded83171580d24004d272bab0f2acbfbf36e1fd1f0aeebb'),
-          ]
-          for block, (target, expected) in zip(blocks, targets):
-              data = gzip.decompress(base64.b64decode(''.join(block.split())))
-              actual = hashlib.sha256(data).hexdigest()
-              if actual != expected:
-                  raise SystemExit(f'{target}: digest {actual} != {expected}')
-              Path(target).write_bytes(data)
-              print(target, actual)
+          if not blocks:
+              raise SystemExit('preserved index payload missing')
+          data = gzip.decompress(base64.b64decode(''.join(blocks[0].split())))
+          expected = '1152b53ce80cb1520559f84d9239e9c5de95ba04d4be67510c446ef9fcd993cd'
+          actual = hashlib.sha256(data).hexdigest()
+          if actual != expected:
+              raise SystemExit(f'index.py digest {actual} != {expected}')
+          Path('src/autonomic_kb/index.py').write_bytes(data)
+          print('src/autonomic_kb/index.py', actual)
           PY
-      - name: Verify repaired compatibility and incremental behavior
+      - name: Verify incremental behavior and full suite
         run: |
           python -m pip install -e '.[dev]'
           python -m compileall -q src tests
-          python -m unittest tests.test_v2_incremental tests.test_v2_core -v
+          python -m unittest tests.test_v2_incremental -v
           python -m pytest -q
-      - name: Push only source and test repairs
+      - name: Push only repaired index
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- src/autonomic_kb/index.py tests/test_v2_core.py; then
-            echo 'Exact preserved files already present.'
+          if git diff --quiet -- src/autonomic_kb/index.py; then
+            echo 'Exact preserved index already present.'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- src/autonomic_kb/index.py tests/test_v2_core.py
+          git add -- src/autonomic_kb/index.py
           git diff --cached --check
           git commit -m 'Fix persistent incremental index manifest'
           git push origin HEAD:feat/sota-memory-v2
