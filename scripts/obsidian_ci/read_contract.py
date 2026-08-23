@@ -17,9 +17,7 @@ def verify_files_properties_and_tags(cli: OfficialCLI, report: IntegrationReport
         raise AssertionError(f"Obsidian folder index is missing Nested: {folders_output!r}")
     report.add("obsidian-file-index", f"{total_files} Markdown files and nested folders indexed")
 
-    source_text = assert_output_contains(
-        cli.run("read", "path=Source.md"), "obsidian-ci-unique-phrase-48291", "read"
-    )
+    source_text = assert_output_contains(cli.run("read", "path=Source.md"), "obsidian-ci-unique-phrase-48291", "read")
     report.add("obsidian-read", f"{len(source_text)} characters")
 
     file_info = clean(cli.run("file", "path=Source.md").stdout)
@@ -36,9 +34,7 @@ def verify_files_properties_and_tags(cli: OfficialCLI, report: IntegrationReport
         "rank": "7",
         "verified_flag": "true",
     }.items():
-        assert_output_contains(
-            cli.run("property:read", f"name={name}", "path=Source.md"), expected, f"property {name}"
-        )
+        assert_output_contains(cli.run("property:read", f"name={name}", "path=Source.md"), expected, f"property {name}")
     report.add("obsidian-properties", "scalar frontmatter values agree")
 
     properties = decode_json_output(cli.run("properties", "path=Source.md", "format=json").stdout)
@@ -63,9 +59,7 @@ def verify_files_properties_and_tags(cli: OfficialCLI, report: IntegrationReport
         raise AssertionError(f"Obsidian tag reverse index is incomplete: {tag_info!r}")
     report.add("obsidian-tag-reverse-index", "integration tag resolves fixture files")
 
-    search_output = clean(
-        cli.run("search", "query=obsidian-ci-unique-phrase-48291", "format=json").stdout
-    )
+    search_output = clean(cli.run("search", "query=obsidian-ci-unique-phrase-48291", "format=json").stdout)
     if "Source.md" not in search_output:
         raise AssertionError(f"Obsidian search did not find Source.md: {search_output!r}")
     report.add("obsidian-search", "unique phrase resolved to Source.md")

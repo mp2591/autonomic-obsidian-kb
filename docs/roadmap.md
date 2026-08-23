@@ -1,31 +1,26 @@
-# Roadmap
+# Roadmap after v0.2
 
-Extensions are ordered by evidence and risk, not novelty.
+V0.2 implements the correctness/measurement foundation: evidence and operation ledgers, schema v2, incremental indexing, adaptive routes, RRF, calibrated soft ranking, set allocation, temporal validity, executable validation, taint/authorization, task outcomes, shadow replay, leases and adversarial tests.
 
-## Near term
+## Evidence-gated next work
 
-- Execute validation adapters for commands, package metadata, JSON Schema/OpenAPI, and source hashes.
-- Add Git commit/PR ingestion with durable candidate extraction and user-correction capture.
-- Add retrieval feedback (`helpful`, `incorrect`, `expanded`) and utility decay.
-- Expand the real-Obsidian compatibility matrix to macOS, Windows, ARM64 Linux, and selected plugin fixtures.
-- Add branch/rebase-aware invalidation and rename detection using Git object IDs.
-- Expand benchmark corpora and include real agent traces with actual token accounting.
+- richer language-specific Tree-sitter/LSIF/code intelligence beyond the Python AST baseline;
+- sparse neural and late-interaction retrieval backends;
+- learned route selection after sufficient paired task traces;
+- stronger semantic contradiction/NLI adjudication for ambiguous cases;
+- value-of-information validation scheduling learned from outcomes;
+- branch-overlay materialization and context-delta protocol;
+- signed evidence/operation attestations for shared enterprise vaults;
+- macOS/Windows/ARM64 Obsidian compatibility matrix;
+- larger multi-repository coding-agent replay corpus.
 
-## Evidence-gated
+## Experimental only
 
-- Local embedding candidate generation for paraphrase misses.
-- Learned ranking weights with monotonic trust/scope constraints.
-- Filesystem watcher/daemon for large multi-agent vaults.
-- Global + per-repository federated vaults with explicit trust domains.
-- Optional graph database only if bounded SQLite edges become a measured bottleneck.
-- Static and dynamic summary refresh when source changes can be validated automatically.
+- reinforcement-learned memory operations;
+- unconstrained agentic semantic healing;
+- graph database migration;
+- automatic contradiction winner selection;
+- global shared vector namespace;
+- mandatory always-on daemon.
 
-## Longer term
-
-- Multi-agent lease/deduplication for concurrent investigations.
-- Bayesian confidence updates from validation and correction history.
-- Counterfactual task replay to estimate rediscovery avoided.
-- Signed provenance and policy-enforced promotion for shared enterprise vaults.
-- Safe external-authority refresh with source pinning, snapshots, and citation checks.
-
-Every roadmap item must pass the same acceptance test: positive net token savings, preserved or improved correctness, and manageable local-first operational cost.
+None should become default without positive paired task utility and preserved safety.

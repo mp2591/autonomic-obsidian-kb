@@ -9,11 +9,38 @@ from .cli import OfficialCLI, assert_output_contains, clean
 from .report import IntegrationReport
 
 REQUIRED_COMMANDS = {
-    "aliases", "append", "backlinks", "commands", "create", "deadends", "eval", "file", "files",
-    "folder", "folders", "move", "orphans", "prepend", "properties", "property:read",
-    "property:remove", "property:set", "read", "reload", "rename", "search",
-    "search:context", "tag", "tags", "task", "tasks", "unresolved", "vault", "version",
-    "dev:errors", "dev:screenshot",
+    "aliases",
+    "append",
+    "backlinks",
+    "commands",
+    "create",
+    "deadends",
+    "eval",
+    "file",
+    "files",
+    "folder",
+    "folders",
+    "move",
+    "orphans",
+    "prepend",
+    "properties",
+    "property:read",
+    "property:remove",
+    "property:set",
+    "read",
+    "reload",
+    "rename",
+    "search",
+    "search:context",
+    "tag",
+    "tags",
+    "task",
+    "tasks",
+    "unresolved",
+    "vault",
+    "version",
+    "dev:errors",
+    "dev:screenshot",
 }
 
 
@@ -24,9 +51,7 @@ def verify_capabilities(
     artifacts: Path,
     report: IntegrationReport,
 ) -> None:
-    version = assert_output_contains(
-        cli.run("version", target_vault=False), expected_version, "Obsidian version"
-    )
+    version = assert_output_contains(cli.run("version", target_vault=False), expected_version, "Obsidian version")
     report.obsidian_version = version
     report.add("official-cli-version", version)
 
@@ -35,8 +60,7 @@ def verify_capabilities(
     missing = sorted(REQUIRED_COMMANDS - discovered)
     if missing:
         raise AssertionError(
-            f"official CLI help is missing required commands: {missing}; "
-            f"discovered={sorted(discovered)}"
+            f"official CLI help is missing required commands: {missing}; discovered={sorted(discovered)}"
         )
     artifacts.joinpath("obsidian-discovered-commands.json").write_text(
         json.dumps(sorted(discovered), indent=2) + "\n", encoding="utf-8"

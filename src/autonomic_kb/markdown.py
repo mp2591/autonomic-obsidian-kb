@@ -8,6 +8,11 @@ from typing import Any
 
 from .util import stable_json
 
+try:
+    import yaml  # type: ignore
+except ImportError:  # pragma: no cover
+    yaml = None
+
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 _LAYER = re.compile(r"^##\s+L([0-4])(?:\s*[-—:]\s*|\s+)(.*)$", re.MULTILINE | re.IGNORECASE)
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
@@ -32,7 +37,7 @@ def _scalar(value: str) -> Any:
         return lowered == "true"
     if lowered in {"null", "none", "~"}:
         return None
-    if value[0:1] in {'[', '{', '"'} or value[-1:] == '"':
+    if value[:1] in {"[", "{", '"'} or value[-1:] == '"':
         try:
             return json.loads(value)
         except json.JSONDecodeError:
@@ -50,10 +55,18 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     match = _FRONTMATTER.match(text)
     if not match:
         return {}, text
+    raw = match.group(1)
+    if yaml is not None:
+        try:
+            loaded = yaml.safe_load(raw)
+            if isinstance(loaded, dict):
+                return loaded, text[match.end() :]
+        except Exception:
+            pass
     metadata: dict[str, Any] = {}
     key: str | None = None
     list_values: list[Any] | None = None
-    for raw_line in match.group(1).splitlines():
+    for raw_line in raw.splitlines():
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
         if raw_line.startswith(("  - ", "- ")) and key is not None:
@@ -68,15 +81,47 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         key = key.strip()
         metadata[key] = _scalar(raw_value)
         list_values = None
-    return metadata, text[match.end():]
+    return metadata, text[match.end() :]
 
 
 def dump_frontmatter(metadata: dict[str, Any]) -> str:
     preferred = [
-        "id", "title", "type", "scope", "repo", "project", "module", "branch", "status",
-        "summary", "confidence", "authority", "created", "updated", "validated", "freshness",
-        "token_cost", "utility", "claim_key", "claim_value", "applies_to", "agents", "provenance",
-        "relations", "invalidation", "supersedes", "superseded_by", "tags",
+        "schema_version",
+        "id",
+        "title",
+        "kind",
+        "type",
+        "scope",
+        "repo",
+        "repository_id",
+        "project",
+        "module",
+        "branch",
+        "status",
+        "summary",
+        "confidence",
+        "authority",
+        "taint",
+        "authorized_instruction",
+        "created",
+        "updated",
+        "validated",
+        "freshness",
+        "validity",
+        "token_cost",
+        "utility",
+        "claim_key",
+        "claim_value",
+        "applies_to",
+        "agents",
+        "provenance",
+        "evidence",
+        "validators",
+        "relations",
+        "invalidation",
+        "supersedes",
+        "superseded_by",
+        "tags",
     ]
     keys = [key for key in preferred if key in metadata]
     keys.extend(sorted(key for key in metadata if key not in set(keys)))
@@ -139,13 +184,7 @@ def parse_markdown(text: str) -> ParsedMarkdown:
 
 
 def render_note(metadata: dict[str, Any], layers: dict[int, str], extra_body: str = "") -> str:
-    labels = {
-        0: "Pointer",
-        1: "Fact",
-        2: "Summary",
-        3: "Detail",
-        4: "Provenance",
-    }
+    labels = {0: "Pointer", 1: "Fact", 2: "Summary", 3: "Detail", 4: "Provenance"}
     sections: list[str] = []
     for level in sorted(layers):
         content = layers[level].strip()

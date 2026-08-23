@@ -29,9 +29,7 @@ def verify_kb_index_and_retrieval(vault: Path, report: IntegrationReport) -> KBC
         }
         if indexed_links != EXPECTED_LINKS:
             raise AssertionError(f"KB index link mismatch: {indexed_links!r}")
-        manifest = Retriever(config, index).retrieve(
-            "obsidian-ci-unique-phrase-48291", budget=240, paths=["Source.md"]
-        )
+        manifest = Retriever(config, index).retrieve("obsidian-ci-unique-phrase-48291", budget=240, paths=["Source.md"])
         if SOURCE_ID not in {item.id for item in manifest.items}:
             raise AssertionError(f"KB retrieval missed the shared-vault source: {manifest.to_dict()}")
     report.add("kb-index-and-retrieval", "same Obsidian vault indexed and retrieved")

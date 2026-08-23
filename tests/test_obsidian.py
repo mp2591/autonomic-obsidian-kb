@@ -31,9 +31,10 @@ class ObsidianBridgeTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0, f"{vault}\n", "")
                 return subprocess.CompletedProcess(command, 0, "fixture\n", "")
 
-            with patch("autonomic_kb.obsidian.shutil.which", return_value="/usr/bin/obsidian"), patch(
-                "autonomic_kb.obsidian.subprocess.run", side_effect=fake_run
-            ) as run:
+            with (
+                patch("autonomic_kb.obsidian.shutil.which", return_value="/usr/bin/obsidian"),
+                patch("autonomic_kb.obsidian.subprocess.run", side_effect=fake_run) as run,
+            ):
                 bridge = ObsidianBridge(vault, vault_name="ci-vault")
                 status = bridge.status()
                 self.assertTrue(status.responsive)
@@ -47,7 +48,6 @@ class ObsidianBridgeTests(unittest.TestCase):
                     command,
                     ["/usr/bin/obsidian", "vault=ci-vault", "read", "path=Source.md"],
                 )
-
 
     def test_help_parser_only_returns_top_level_commands(self) -> None:
         help_text = """Commands:
@@ -68,8 +68,9 @@ Developer:
 
     def test_timeout_is_returned_as_a_completed_process(self) -> None:
         timeout = subprocess.TimeoutExpired(["obsidian", "version"], 1, output=b"partial")
-        with patch("autonomic_kb.obsidian.shutil.which", return_value="/usr/bin/obsidian"), patch(
-            "autonomic_kb.obsidian.subprocess.run", side_effect=timeout
+        with (
+            patch("autonomic_kb.obsidian.shutil.which", return_value="/usr/bin/obsidian"),
+            patch("autonomic_kb.obsidian.subprocess.run", side_effect=timeout),
         ):
             result = ObsidianBridge(Path.cwd()).run("version", target_vault=False, timeout=1)
         self.assertEqual(result.returncode, 124)

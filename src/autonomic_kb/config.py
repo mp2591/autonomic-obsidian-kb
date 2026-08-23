@@ -6,7 +6,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration\n\n[retrieval]\ndefault_budget = 1000\nminimum_score = 0.28\nmax_candidates = 200\n\n[lifecycle]\npromotion_threshold = 0.62\nstale_after_days = 120\narchive_after_days = 365\n\n[security]\nallow_untrusted = false\nallow_cross_repo = false\n\n[paths]\ninbox = \"00-inbox\"\narchive = \"99-archive\"\nquarantine = \"98-quarantine\"\n"""
+DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration
+
+[retrieval]
+default_budget = 1000
+minimum_score = 0.28
+max_candidates = 200
+routes = ["exact", "lexical", "graph", "temporal"]
+rrf_k = 60
+
+[lifecycle]
+promotion_threshold = 0.62
+stale_after_days = 120
+archive_after_days = 365
+recurrence_threshold = 2
+
+[security]
+allow_untrusted = false
+allow_cross_repo = false
+require_instruction_authorization = true
+
+[paths]
+inbox = "00-inbox"
+archive = "99-archive"
+quarantine = "98-quarantine"
+
+[telemetry]
+enabled = true
+"""
 
 
 @dataclass(slots=True)
@@ -16,14 +43,19 @@ class KBConfig:
     default_budget: int = 1000
     minimum_score: float = 0.28
     max_candidates: int = 200
+    retrieval_routes: tuple[str, ...] = ("exact", "lexical", "graph", "temporal")
+    rrf_k: int = 60
     promotion_threshold: float = 0.62
     stale_after_days: int = 120
     archive_after_days: int = 365
+    recurrence_threshold: int = 2
     allow_untrusted: bool = False
     allow_cross_repo: bool = False
+    require_instruction_authorization: bool = True
     inbox_dir: str = "00-inbox"
     archive_dir: str = "99-archive"
     quarantine_dir: str = "98-quarantine"
+    telemetry_enabled: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -39,17 +71,48 @@ class KBConfig:
         return self.runtime_dir / "actions.jsonl"
 
     @property
+    def trace_path(self) -> Path:
+        return self.runtime_dir / "traces.jsonl"
+
+    @property
+    def feedback_path(self) -> Path:
+        return self.runtime_dir / "feedback.jsonl"
+
+    @property
+    def evidence_dir(self) -> Path:
+        return self.vault / ".kb-evidence"
+
+    @property
+    def operation_dir(self) -> Path:
+        return self.vault / ".kb-memory-events"
+
+    @property
+    def episode_dir(self) -> Path:
+        return self.vault / ".kb-episodes"
+
+    @property
+    def lease_dir(self) -> Path:
+        return self.runtime_dir / "leases"
+
+    @property
     def config_path(self) -> Path:
         return self.vault / "kb.toml"
 
     def ensure_runtime(self) -> None:
-        self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        (self.vault / self.inbox_dir).mkdir(parents=True, exist_ok=True)
-        (self.vault / self.archive_dir).mkdir(parents=True, exist_ok=True)
-        (self.vault / self.quarantine_dir).mkdir(parents=True, exist_ok=True)
+        for path in (
+            self.runtime_dir,
+            self.vault / self.inbox_dir,
+            self.vault / self.archive_dir,
+            self.vault / self.quarantine_dir,
+            self.evidence_dir,
+            self.operation_dir,
+            self.episode_dir,
+            self.lease_dir,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> "KBConfig":
+    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> KBConfig:
         vault_path = find_vault(vault)
         repo_path = Path(repo).expanduser().resolve() if repo else find_repo(vault_path)
         raw: dict[str, Any] = {}
@@ -61,21 +124,32 @@ class KBConfig:
         lifecycle = raw.get("lifecycle", {})
         security = raw.get("security", {})
         paths = raw.get("paths", {})
+        telemetry = raw.get("telemetry", {})
+        routes = retrieval.get("routes", ["exact", "lexical", "graph", "temporal"])
+        if isinstance(routes, str):
+            routes = [routes]
         config = cls(
             vault=vault_path,
             repo=repo_path,
             default_budget=int(retrieval.get("default_budget", 1000)),
             minimum_score=float(retrieval.get("minimum_score", 0.28)),
             max_candidates=int(retrieval.get("max_candidates", 200)),
+            retrieval_routes=tuple(str(route) for route in routes),
+            rrf_k=int(retrieval.get("rrf_k", 60)),
             promotion_threshold=float(lifecycle.get("promotion_threshold", 0.62)),
             stale_after_days=int(lifecycle.get("stale_after_days", 120)),
             archive_after_days=int(lifecycle.get("archive_after_days", 365)),
+            recurrence_threshold=int(lifecycle.get("recurrence_threshold", 2)),
             allow_untrusted=bool(security.get("allow_untrusted", False)),
             allow_cross_repo=bool(security.get("allow_cross_repo", False)),
+            require_instruction_authorization=bool(security.get("require_instruction_authorization", True)),
             inbox_dir=str(paths.get("inbox", "00-inbox")),
             archive_dir=str(paths.get("archive", "99-archive")),
             quarantine_dir=str(paths.get("quarantine", "98-quarantine")),
-            extra={k: v for k, v in raw.items() if k not in {"retrieval", "lifecycle", "security", "paths"}},
+            telemetry_enabled=bool(telemetry.get("enabled", True)),
+            extra={
+                k: v for k, v in raw.items() if k not in {"retrieval", "lifecycle", "security", "paths", "telemetry"}
+            },
         )
         config.ensure_runtime()
         return config
@@ -108,5 +182,4 @@ def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:
         raise FileExistsError(f"{config_path} already exists; pass --force to replace it")
     config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
     (vault / ".obsidian").mkdir(exist_ok=True)
-    config = KBConfig.load(vault)
-    return config
+    return KBConfig.load(vault)

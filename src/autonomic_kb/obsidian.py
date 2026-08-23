@@ -12,14 +12,6 @@ _COMMAND = re.compile(r"^ {2}([a-z][a-z0-9:-]*)[ \t]{2,}\S", re.IGNORECASE | re.
 
 
 def parse_help_commands(help_text: str) -> list[str]:
-    """Return exact top-level commands from first-party ``obsidian help`` output.
-
-    Obsidian indents commands by two spaces and their parameters by four.
-    Matching the indentation prevents options such as ``file=<name>`` from
-    being misreported as commands, and parsing the complete help output avoids
-    losing commands that appear after a human-readable excerpt is truncated.
-    """
-
     return sorted({match.group(1).lower() for match in _COMMAND.finditer(help_text)})
 
 
@@ -40,16 +32,6 @@ class ObsidianStatus:
 
 
 class ObsidianBridge:
-    """Capability-probed bridge to the first-party Obsidian CLI.
-
-    The official CLI is an app-backed IPC client. The desktop process must be
-    installed, running, and configured with CLI support. Core KB operations do
-    not depend on this bridge; they continue to operate directly on Markdown.
-
-    ``vault_name`` is the name or ID registered in Obsidian's global
-    ``obsidian.json``. When omitted, the vault directory name is used.
-    """
-
     def __init__(self, vault: Path, binary: str = "obsidian", vault_name: str | None = None):
         self.vault = vault.resolve()
         self.binary = shutil.which(binary) or ""
@@ -58,23 +40,21 @@ class ObsidianBridge:
     def status(self, timeout: float = 5.0) -> ObsidianStatus:
         if not self.binary:
             return ObsidianStatus(error="official Obsidian CLI binary not found")
-
         version = self._run(["version"], timeout=timeout)
         help_result = self._run(["help"], timeout=timeout)
         responsive = version.returncode == 0 or help_result.returncode == 0
-        vault_result = self._run(
-            [f"vault={self.vault_name}", "vault", "info=path"],
-            timeout=timeout,
-        ) if responsive else subprocess.CompletedProcess([], 1, "", "CLI is not responsive")
+        vault_result = (
+            self._run([f"vault={self.vault_name}", "vault", "info=path"], timeout=timeout)
+            if responsive
+            else subprocess.CompletedProcess([], 1, "", "CLI is not responsive")
+        )
         vault_path = (vault_result.stdout or "").strip()
         vault_responsive = vault_result.returncode == 0 and self._same_path(vault_path, self.vault)
-
         errors = []
         if not responsive:
             errors.append((version.stderr or help_result.stderr or "CLI did not respond").strip())
         elif not vault_responsive:
-            detail = (vault_result.stderr or vault_result.stdout or "target vault did not respond").strip()
-            errors.append(detail)
+            errors.append((vault_result.stderr or vault_result.stdout or "target vault did not respond").strip())
         return ObsidianStatus(
             binary=self.binary,
             available=True,
@@ -87,8 +67,6 @@ class ObsidianBridge:
         )
 
     def wait_until_ready(self, timeout: float = 60.0, interval: float = 1.0) -> ObsidianStatus:
-        """Wait until both the app-backed CLI and target vault are responsive."""
-
         deadline = time.monotonic() + timeout
         last = self.status(timeout=min(5.0, max(interval, 1.0)))
         while time.monotonic() < deadline:
@@ -101,23 +79,12 @@ class ObsidianBridge:
     def capabilities(self) -> dict[str, Any]:
         status = self.status()
         help_result = self._run(["help"], timeout=5.0) if self.binary else None
-        help_text = ""
-        if help_result is not None:
-            help_text = help_result.stdout or help_result.stderr or ""
-        return {
-            "status": status.to_dict(),
-            "discovered_commands": parse_help_commands(help_text),
-        }
+        help_text = (help_result.stdout or help_result.stderr or "") if help_result else ""
+        return {"status": status.to_dict(), "discovered_commands": parse_help_commands(help_text)}
 
     def run(
-        self,
-        command: str,
-        *arguments: str,
-        timeout: float = 10.0,
-        target_vault: bool = True,
+        self, command: str, *arguments: str, timeout: float = 10.0, target_vault: bool = True
     ) -> subprocess.CompletedProcess[str]:
-        """Run one official CLI command, targeting this bridge's vault by default."""
-
         if not self.binary:
             raise FileNotFoundError("official Obsidian CLI binary not found")
         command_line = [command, *arguments]
@@ -134,8 +101,9 @@ class ObsidianBridge:
         except subprocess.TimeoutExpired as error:
             stdout = error.stdout.decode() if isinstance(error.stdout, bytes) else (error.stdout or "")
             stderr = error.stderr.decode() if isinstance(error.stderr, bytes) else (error.stderr or "")
-            detail = stderr or "timed out; is Obsidian running and is CLI mode enabled?"
-            return subprocess.CompletedProcess(command, 124, stdout, detail)
+            return subprocess.CompletedProcess(
+                command, 124, stdout, stderr or "timed out; is Obsidian running and is CLI mode enabled?"
+            )
 
     @staticmethod
     def _same_path(value: str, expected: Path) -> bool:

@@ -5,7 +5,7 @@ import argparse
 import json
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -24,7 +24,7 @@ def main() -> int:
     args = parser.parse_args()
     binary = shutil.which(args.binary)
     value = {
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": datetime.now(UTC).isoformat(),
         "binary": binary,
         "note": "The app-backed CLI may require Obsidian desktop to be running.",
         "probes": [],

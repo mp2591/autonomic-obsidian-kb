@@ -1,42 +1,21 @@
-# Benchmark design
+# Evaluation and benchmark design
 
-## Question
+V2 keeps the original deterministic proxy as a fast regression guardrail, but does not treat it as proof of real token savings.
 
-Does the KB reduce the total context/search burden while still returning the small set of memories required by realistic tasks?
+## Deterministic layer
 
-## Compared workflows
+Measures expected-memory coverage, injected context, precision/false context and proxy no-KB versus assisted token cost on fixed fixtures.
 
-1. **No-KB proxy:** an agent reads/searches the relevant corpus at full-note granularity.
-2. **KB-assisted:** task query cost + selected progressive layers + amortized maintenance proxy.
+## Task-outcome layer
 
-The benchmark reports estimated tokens, net savings, reduction, precision among injected memories, and coverage of expected canonical IDs.
+`kb outcome` records actual success, model tokens, searches, file reads, commands, retries, corrections, latency, unsafe outcomes and retrieved memory IDs. `kb benchmark --traces` compares paired no-KB/KB outcomes.
 
-## Why it is a proxy
+## Matched replay
 
-An offline harness cannot perfectly know how much reasoning or searching a specific model would perform. Results are therefore labeled deterministic proxy estimates. They are useful for regression and architecture comparisons, not for claiming universal model savings.
+`kb replay --spec` runs explicit argv-array external-agent experiments under fixed repository/task configuration. It never invokes a shell. This is intended for reproducible paired task evaluation.
 
-## Guardrails
+## Shadow evaluation
 
-A change should not be accepted solely because it raises recall. It should improve or preserve:
+`kb shadow` compares candidate retrieval routes without injecting alternatives into the acting agent. This supports safe route/ranker experiments and counterfactual analysis.
 
-- net token reduction;
-- expected-memory coverage;
-- precision of injected context;
-- stale/unsafe exclusion;
-- deterministic repeatability.
-
-The sample suite covers repository orientation, test commands, architecture decisions, and a debugging failure/solution pair.
-
-## Run
-
-```bash
-PYTHONPATH=src python benchmarks/run.py
-# or
-kb --vault examples/sample-vault benchmark \
-  --tasks benchmarks/tasks.json \
-  --output benchmarks/results/reference.json
-```
-
-## Production measurement
-
-Live agents should record a no-KB matched baseline or an A/B cohort, actual model token accounting, repository searches after context injection, task completion/correction, and maintenance work. Never compare different tokenizers or model/tool policies without normalization.
+Release decisions should consider task-success delta, total-token delta, search/read delta, false-context rate, stale/unsafe retrieval, latency and maintenance cost—not recall alone.

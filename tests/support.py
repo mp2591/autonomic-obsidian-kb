@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +10,7 @@ def make_vault(root: Path, repo: Path | None = None) -> KBConfig:
     vault = root / "vault"
     vault.mkdir(parents=True, exist_ok=True)
     (vault / "kb.toml").write_text(
-        "[retrieval]\ndefault_budget=500\nminimum_score=0.20\nmax_candidates=100\n"
-        "[lifecycle]\npromotion_threshold=0.62\nstale_after_days=120\narchive_after_days=365\n"
-        "[security]\nallow_untrusted=false\nallow_cross_repo=false\n"
-        "[paths]\ninbox=\"00-inbox\"\narchive=\"99-archive\"\nquarantine=\"98-quarantine\"\n",
+        '[retrieval]\ndefault_budget=500\nminimum_score=0.20\nmax_candidates=100\n[lifecycle]\npromotion_threshold=0.62\nstale_after_days=120\narchive_after_days=365\n[security]\nallow_untrusted=false\nallow_cross_repo=false\n[paths]\ninbox="00-inbox"\narchive="99-archive"\nquarantine="98-quarantine"\n',
         encoding="utf-8",
     )
     return KBConfig.load(vault, repo)
@@ -27,17 +22,17 @@ def write_memory(
     memory_id: str,
     title: str,
     summary: str,
-    memory_type: str = "fact",
-    scope: str = "repository",
-    status: str = "active",
-    confidence: float = 0.9,
-    authority: str = "verified",
-    applies_to: list[str] | None = None,
-    relations: dict[str, list[str]] | None = None,
+    memory_type="fact",
+    scope="repository",
+    status="active",
+    confidence=0.9,
+    authority="verified",
+    applies_to=None,
+    relations=None,
     **metadata: Any,
 ) -> Path:
     now = utc_now()
-    base: dict[str, Any] = {
+    base = {
         "id": memory_id,
         "title": title,
         "type": memory_type,
