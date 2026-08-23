@@ -34,7 +34,21 @@ jobs:
       - name: Compile
         run: python -m compileall -q src scripts tests
       - name: Ruff
-        run: ruff check src scripts tests
+        shell: bash
+        run: |
+          set +e
+          ruff check src scripts tests --output-format=json > "ruff-report-${{ matrix.python-version }}.json"
+          status=$?
+          cat "ruff-report-${{ matrix.python-version }}.json"
+          exit "$status"
+      - name: Upload Ruff diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruff-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: ruff-report-${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Pytest compatibility
