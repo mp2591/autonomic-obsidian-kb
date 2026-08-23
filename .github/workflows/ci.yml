@@ -41,12 +41,34 @@ jobs:
           status=$?
           cat "ruff-report-${{ matrix.python-version }}.json"
           exit "$status"
+      - name: Generate deterministic Ruff autofix candidate
+        if: failure() && matrix.python-version == '3.11'
+        shell: bash
+        run: |
+          ruff format src scripts tests
+          ruff check src scripts tests --fix || true
+          ruff format src scripts tests
+          ruff check src scripts tests --output-format=json > ruff-after-3.11.json || true
+          git diff -- src scripts tests > ruff-autofix.patch
+          tar -czf ruff-autofix-tree.tar.gz src scripts tests
+          cat ruff-after-3.11.json
       - name: Upload Ruff diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ruff-${{ matrix.python-version }}-${{ github.run_attempt }}
           path: ruff-report-${{ matrix.python-version }}.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Ruff autofix candidate
+        if: failure() && matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruff-autofix-3.11-${{ github.run_attempt }}
+          path: |
+            ruff-after-3.11.json
+            ruff-autofix.patch
+            ruff-autofix-tree.tar.gz
           if-no-files-found: error
           retention-days: 7
       - name: Unit tests
