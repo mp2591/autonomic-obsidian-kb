@@ -1,53 +1,29 @@
-# Retrieval architecture
+# Retrieval v2
+
+Retrieval minimizes expected task cost rather than dumping a fixed top-k.
 
 ## Inputs
 
-`kb retrieve` consumes task text, a hard budget, optional requested paths, current working directory, Git root/branch/diff, agent identity, and session identity.
+Task text, token budget, cwd, canonical repository identity, Git branch/head/merge-base, changed/requested paths, changed symbols, agent/session identity, and task risk.
 
-## Stage 1: classification
+## Stages
 
-A deterministic low-cost classifier maps task terms to memory types such as commands, architecture, APIs, failures, solutions, dependencies, and conventions. The classifier is a ranking aid, not an authority decision.
+1. **Query planning:** infer intent, identifiers, paths, error signatures, temporal hints and memory types.
+2. **Adaptive route:** `none`, `exact+lexical`, `lexical`, `hybrid`, or `temporal`.
+3. **Candidate generation:** exact/path lookup, FTS5 BM25, expanded lexical queries, bounded graph edges and optional local dense retrieval.
+4. **RRF fusion:** heterogeneous rankings are combined without pretending their raw scores share a scale.
+5. **Hard gates:** status, trust, privileged-instruction authorization, canonical repository identity, module/branch/task/session scope and valid time/commit lineage.
+6. **Soft reranking:** interpretable feature policy covers lexical/exact/RRF, task type, path/symbol proximity, confidence, authority, validation, freshness, historical utility, evidence strength and query overlap.
+7. **Set allocation:** marginal gain rewards complementary task coverage and evidence while penalizing redundancy, risk and token cost.
+8. **Compilation:** task-specific L0-L3 views preserve exact commands/identifiers and omit irrelevant prose.
+9. **Observability:** selected/excluded candidates, features, route, budget and task outcome are traceable.
 
-## Stage 2: candidate generation
+The system may return `no_retrieval_needed`, `insufficient_evidence`, or `conflicting_evidence` rather than manufacturing context.
 
-SQLite FTS5 searches title, summary, L1, L2, L3, and path. If FTS5 is unavailable, a lexical SQL fallback is used. Empty context queries can scan active metadata, but normal retrieval never starts from the entire body corpus.
+## Learned ranking
 
-Embeddings are deliberately absent from the default path. An embedding backend should be added only as a parallel candidate generator and should still pass every later gate.
+Feedback labels train only soft-feature weights in `.kb/rank-policy.json`. Scope, trust, authorization and temporal validity remain non-learnable constraints. Candidate policies can be compared in shadow mode before they affect an agent.
 
-## Stage 3: hard gates
+## Dense retrieval
 
-1. Status: quarantined, archived, superseded, and conflicted notes are excluded.
-2. Trust: untrusted or confidence below 0.35 is excluded unless explicitly requested.
-3. Repository/project: mismatches are excluded unless cross-repo policy is enabled.
-4. Module: requires module or applicable-path match.
-5. Branch: requires exact active branch.
-6. Task/session: requires exact identity.
-
-These gates prevent a high lexical score from turning contamination into context.
-
-## Stage 4: ranking
-
-Accepted candidates are scored by lexical relevance, scope, active path, type, confidence, authority, validation, freshness, and historical utility. The score is deterministic and its components are returned in the `why` trail.
-
-## Stage 5: bounded graph expansion
-
-Only the three strongest seeds above a relevance threshold can expand one relationship hop. Expanded notes are rescored and gated. This allows a failure note to bring in its `fixed-by` solution without traversing the entire vault.
-
-## Stage 6: disclosure and allocation
-
-Auto depth uses L2 only for strong candidates, L1 for ordinary useful facts, and L0 for marginal pointers. A candidate that does not fit is downgraded before exclusion. Selection ends when the budget is exhausted or marginal score per token falls below the stop threshold.
-
-## Stage 7: observability
-
-Every considered note receives an inclusion or exclusion decision with score and reasons. `kb why <id>` shows recent decisions. Usage records include retrieval ID, task hash, rank, score, layer, and token estimate.
-
-## Expansion contract
-
-The manifest is sufficient by default. An agent should read the source Markdown or request a deeper layer only when:
-
-- a selected fact is ambiguous;
-- provenance is needed for a high-risk decision;
-- the task reaches an edge case explicitly named by the summary;
-- validation status is not strong enough for the action.
-
-This contract prevents “retrieve summary, then immediately dump every source” behavior.
+Dense retrieval is optional (`.[embeddings]`) and is only a candidate generator. It never bypasses the exact/lexical baseline or hard policy gates. Promotion to the default route requires positive task-level net utility on paired replay.

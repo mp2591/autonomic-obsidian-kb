@@ -1,123 +1,111 @@
-name: V2 reconciliation
+name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  OBSIDIAN_VERSION: "1.13.7"
+
 jobs:
-  reconcile-v2:
-    name: Reconcile omitted v2 files
-    if: github.event_name == 'pull_request' && github.head_ref == 'feat/sota-memory-v2'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: write
+  core:
+    name: Core / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: feat/sota-memory-v2
-          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
-      - name: Reassemble checksum-locked v2 tree
-        shell: bash
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Compile
+        run: python -m compileall -q src scripts tests
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Pytest compatibility
+        run: python -m pytest -q
+      - name: CLI smoke test
         run: |
-          set -euo pipefail
-          cat .ci-bootstrap/part-*.b64 | base64 --decode > "$RUNNER_TEMP/sota-v2-overlay.tar.gz"
-          echo "0c390ca9e64dd1701823f28f8909c64037b6141724fcaa76eacd16f67cf625b3  $RUNNER_TEMP/sota-v2-overlay.tar.gz" | sha256sum --check
-          mkdir "$RUNNER_TEMP/v2"
-          tar -xzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz" -C "$RUNNER_TEMP/v2"
-      - name: Copy exact omitted files
-        shell: bash
-        run: |
-          set -euo pipefail
-          paths=(
-            .gitignore
-            AGENTS.md
-            README.md
-            docs/testing.md
-            docs/roadmap.md
-            docs/evaluation-v2.md
-            docs/state-of-the-art-v2.md
-            docs/token-economics.md
-            docs/security.md
-            docs/architecture.md
-            docs/autonomic-lifecycle.md
-            docs/retrieval-v2.md
-            docs/evidence-model.md
-            docs/schema.md
-            docs/retrieval.md
-            docs/adversarial-testing.md
-            docs/benchmark.md
-            docs/security-v2.md
-            src/autonomic_kb/compiler.py
-            src/autonomic_kb/query_plan.py
-            src/autonomic_kb/replay.py
-            tests/test_v2_adversarial.py
-            tests/test_v2_incremental.py
-          )
-          for path in "${paths[@]}"; do
-            test -f "$RUNNER_TEMP/v2/$path"
-            mkdir -p "$(dirname "$path")"
-            cp "$RUNNER_TEMP/v2/$path" "$path"
-          done
-          rm -f examples/sample-vault/.kb/code-graph.json examples/sample-vault/.kb/traces.jsonl
-          git diff --check
-      - name: Verify reconciled v2 tree
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install -e '.[dev]'
-          python -m compileall -q src scripts tests
-          python -m unittest discover -s tests -v
-          python -m pytest -q
-          python -m unittest tests.test_v2_adversarial tests.test_v2_incremental -v
           kb --vault examples/sample-vault index --rebuild
           kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
-          python benchmarks/run.py
-      - name: Commit and push reconciled non-workflow files
-        shell: bash
+      - name: Benchmark guardrail
+        run: python benchmarks/run.py
+
+  real-obsidian:
+    name: Real Obsidian desktop + official CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Initialize real-Obsidian diagnostics
+        run: mkdir -p test-artifacts .ci-cache
+
+      - name: Cache pinned Obsidian AppImage
+        uses: actions/cache@v4
+        with:
+          path: .ci-cache
+          key: obsidian-appimage-${{ runner.os }}-${{ env.OBSIDIAN_VERSION }}
+
+      - name: Download and verify official Obsidian release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          paths=(
-            .gitignore
-            AGENTS.md
-            README.md
-            docs/testing.md
-            docs/roadmap.md
-            docs/evaluation-v2.md
-            docs/state-of-the-art-v2.md
-            docs/token-economics.md
-            docs/security.md
-            docs/architecture.md
-            docs/autonomic-lifecycle.md
-            docs/retrieval-v2.md
-            docs/evidence-model.md
-            docs/schema.md
-            docs/retrieval.md
-            docs/adversarial-testing.md
-            docs/benchmark.md
-            docs/security-v2.md
-            src/autonomic_kb/compiler.py
-            src/autonomic_kb/query_plan.py
-            src/autonomic_kb/replay.py
-            tests/test_v2_adversarial.py
-            tests/test_v2_incremental.py
-          )
-          git add -f -- "${paths[@]}"
-          git add -u -- examples/sample-vault/.kb/code-graph.json examples/sample-vault/.kb/traces.jsonl || true
-          if git diff --cached --name-only | grep -q '^\.github/workflows/'; then
-            echo 'Workflow path unexpectedly staged' >&2
-            exit 1
-          fi
-          git diff --cached --check
-          git diff --cached --stat
-          test -n "$(git diff --cached --name-only)"
-          git commit -m 'Complete v2 docs modules and adversarial tests'
-          git push origin HEAD:feat/sota-memory-v2
+          python scripts/download_obsidian_ci.py \
+            --version "$OBSIDIAN_VERSION" \
+            --output .ci-cache/Obsidian.AppImage \
+            --metadata .ci-cache/obsidian-release.json \
+            2>&1 | tee test-artifacts/obsidian-download.log
+          cp .ci-cache/obsidian-release.json test-artifacts/
+          cp .ci-cache/Obsidian.AppImage ci/obsidian/Obsidian.AppImage
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build isolated real-Obsidian test image
+        uses: docker/build-push-action@v6
+        with:
+          context: ci/obsidian
+          file: ci/obsidian/Dockerfile
+          load: true
+          tags: autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
+          build-args: |
+            OBSIDIAN_VERSION=${{ env.OBSIDIAN_VERSION }}
+            AUTONOMIC_INSTALL_SPEC=/workspace[dev]
+          cache-from: type=gha,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
+          cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
+
+      - name: Run Obsidian in Ozone headless mode and execute contract tests
+        run: |
+          docker run --rm --init \
+            --network=none \
+            --shm-size=1g \
+            -e OBSIDIAN_VERSION="$OBSIDIAN_VERSION" \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/test-artifacts:/artifacts:rw" \
+            autonomic-obsidian-kb-obsidian-ci:${{ github.sha }}
+
+      - name: Upload real-Obsidian diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-obsidian-${{ env.OBSIDIAN_VERSION }}-${{ github.run_attempt }}
+          path: test-artifacts
+          if-no-files-found: error
+          retention-days: 14

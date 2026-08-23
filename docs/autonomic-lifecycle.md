@@ -1,64 +1,31 @@
-# Autonomic lifecycle
+# Autonomic lifecycle v2
 
-The implementation uses small feedback loops rather than forcing every concern into one MAPE-K diagram.
+The system uses evidence-backed control loops rather than treating every agent utterance as memory.
 
-## Self-learning / self-evolving
+## Learn
 
-Sources can submit structured candidates through `kb remember`, JSON/JSONL through `kb learn --file`, or a short-lived Git change map through `kb learn --git`. Candidate economics weighs reuse, rediscovery cost, confidence, stability, uniqueness, savings, and maintenance. Low-value material remains in the inbox. Security findings always route to quarantine.
+Capture task episodes and content-addressed evidence. Candidate promotion considers reuse, rediscovery cost, stability, uniqueness, expected savings, maintenance cost, trust, evidence, semantic duplicates and conflicts. Prompt-injected or secret-bearing candidates are quarantined. Privileged instructions require authorization.
 
-## Self-validating
+## Consolidate
 
-`kb validate` checks schema, canonical IDs, links, path applicability, source hashes, expiration, validation age, contradictions, secrets, and persistent instruction attacks. Validation reports are written to SQLite and JSONL telemetry.
+Repeated or high-value observations may be consolidated from episodes into semantic/procedural memories. Operations are append-only and auditable. Raw episodes/evidence remain available if consolidation is later shown wrong.
 
-Source-of-truth validation adapters can later execute commands or compare external authoritative sources. Those extensions must record evidence, time, and exact version.
+## Validate
 
-## Self-healing
+Schema, evidence digests, links, temporal conflicts, source hashes, repository containment and allowlisted executable validators are checked. Validation work can be prioritized by stale probability × reuse × harm / cost.
 
-`kb heal` is dry-run by default. Safe actions include:
+## Heal
 
-- add missing mechanical metadata;
-- mark source-invalidated knowledge stale and reduce confidence;
-- repair a wikilink only when the target is unique;
-- quarantine unsafe persisted content;
-- preserve a timestamped backup before changes.
+Dry-run is the default. Mechanical metadata, stale marking, unambiguous link repair and quarantine are eligible. Files are backed up and post-validation runs after apply; the healer rolls back if errors increase. Semantic contradictions remain explicit.
 
-Duplicate IDs and semantic contradictions are not auto-resolved. The system preserves both provenances and writes a conflict report.
+## Optimize
 
-## Self-organizing
+Retrieval traces and feedback create labeled rank examples. Calibration updates only soft utility weights. Shadow retrieval and matched task replay allow policy comparison before deployment.
 
-Memory type determines a default folder, while canonical IDs and explicit relationships preserve identity across moves. Indexing rebuilds backlinks and graph edges. The graph is retrieval-supporting metadata, not a requirement for human navigation.
+## Prune
 
-## Self-optimizing
+Compaction considers near-duplicate coverage, staleness, usage, utility and replacement evidence. Derived summaries can be archived without deleting their evidence or semantic event history.
 
-Retrieval decisions and usage are recorded. The current deterministic score uses static weights; future weight updates should use benchmark/live outcomes with guardrails against popularity feedback loops. A frequently retrieved incorrect note should lose utility after correction rather than become entrenched.
+## Coordinate
 
-## Self-pruning
-
-`kb compact` identifies exact normalized duplicates, unused stale/superseded notes, and old low-utility notes. It is dry-run by default and archives in Markdown rather than deleting. `kb forget` also archives unless hard deletion is explicitly confirmed.
-
-## Self-scoping
-
-Scopes are assigned at creation and enforced before ranking. Narrow scopes do not leak upward or sideways. Repository and branch context come from Git; module context comes from active/requested paths.
-
-## Self-configuring
-
-`kb.toml` controls budgets, thresholds, staleness, archival age, paths, and cross-scope policy. FTS5 is detected at runtime. Obsidian CLI capabilities are probed rather than assumed.
-
-## Self-monitoring
-
-`status`, `stats`, `doctor`, benchmark results, SQLite usage/decision rows, and JSONL autonomous-action events expose current behavior. Every autonomous change records mode, plan, application count, and reason.
-
-## Self-protecting
-
-Prompt-injection persistence and secrets are scanned before promotion and during validation. Untrusted and conflicted notes fail retrieval. Backups, provenance, and non-destructive archival prevent an autonomic action from erasing evidence.
-
-## Lifecycle states
-
-```text
-candidate -> quarantined
-          -> inbox -> active -> stale -> active (revalidated)
-                            -> conflicted -> active/superseded (human resolution)
-                            -> superseded -> archived -> deleted (explicit only)
-```
-
-Promotion and revalidation should be evidence-driven. Time alone cannot convert a hypothesis into a fact.
+Task leases reduce duplicated multi-agent investigations. Leases are ephemeral and never become semantic truth by themselves.

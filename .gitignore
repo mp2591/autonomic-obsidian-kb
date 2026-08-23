@@ -13,14 +13,19 @@ build/
 **/.kb/index.sqlite3
 **/.kb/index.sqlite3-*
 **/.kb/actions.jsonl
+**/.kb/traces.jsonl
+**/.kb/feedback.jsonl
+**/.kb/outcomes.jsonl
+**/.kb/rank-policy.json
+**/.kb/code-graph.json
+**/.kb/embeddings-*.json
+**/.kb/leases/
 **/.kb/backups/
 **/.kb/contradictions.json
 **/.kb/last-*.json
 
-# Local build preservation is intentionally not published.
+# Durable .kb-evidence, .kb-memory-events, and .kb-episodes are intentionally trackable.
 .local-build-backup/
-
-# Downloaded CI dependencies and local integration artifacts.
 .ci-cache/
 ci/obsidian/Obsidian.AppImage
 test-artifacts/
