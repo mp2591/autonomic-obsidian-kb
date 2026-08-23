@@ -109,3 +109,61 @@ jobs:
           path: test-artifacts
           if-no-files-found: error
           retention-days: 14
+
+  repair-v2-files:
+    name: Repair exact preserved v2 index and core tests
+    if: github.event_name == 'pull_request' && github.head_ref == 'feat/sota-memory-v2'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/sota-memory-v2
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Decode checksum-verified preserved files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib, re
+          workflow = Path('.github/workflows/repair-v2-files.yml').read_text(encoding='utf-8')
+          blocks = re.findall(r"<<'B64'\n(.*?)\nB64", workflow, re.S)
+          if len(blocks) != 2:
+              raise SystemExit(f'expected 2 embedded payloads, found {len(blocks)}')
+          targets = [
+              ('src/autonomic_kb/index.py', '1152b53ce80cb1520559f84d9239e9c5de95ba04d4be67510c446ef9fcd993cd'),
+              ('tests/test_v2_core.py', '3dc270cc5376fa2cbded83171580d24004d272bab0f2acbfbf36e1fd1f0aeebb'),
+          ]
+          for block, (target, expected) in zip(blocks, targets):
+              data = gzip.decompress(base64.b64decode(''.join(block.split())))
+              actual = hashlib.sha256(data).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'{target}: digest {actual} != {expected}')
+              Path(target).write_bytes(data)
+              print(target, actual)
+          PY
+      - name: Verify repaired compatibility and incremental behavior
+        run: |
+          python -m pip install -e '.[dev]'
+          python -m compileall -q src tests
+          python -m unittest tests.test_v2_incremental tests.test_v2_core -v
+          python -m pytest -q
+      - name: Push only source and test repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/autonomic_kb/index.py tests/test_v2_core.py; then
+            echo 'Exact preserved files already present.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/autonomic_kb/index.py tests/test_v2_core.py
+          git diff --cached --check
+          git commit -m 'Fix persistent incremental index manifest'
+          git push origin HEAD:feat/sota-memory-v2
