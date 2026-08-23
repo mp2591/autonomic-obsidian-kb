@@ -1,7 +1,3 @@
-"""Autonomic, token-economical knowledge infrastructure for AI agents."""
+"""Autonomic, token-economical Obsidian knowledge infrastructure."""
 
-from .config import KBConfig
-from .models import MemoryRecord, RetrievalManifest
-
-__all__ = ["KBConfig", "MemoryRecord", "RetrievalManifest"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

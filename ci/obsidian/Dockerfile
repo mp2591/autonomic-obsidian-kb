@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxss1 \
       procps \
       python3 \
+      python3-jsonschema \
+      python3-yaml \
       tini \
       xdg-utils \
     && rm -rf /var/lib/apt/lists/*
