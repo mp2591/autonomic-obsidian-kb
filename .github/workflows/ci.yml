@@ -136,7 +136,8 @@ jobs:
           while IFS= read -r entry; do
             entry="${entry#./}"
             case "$entry" in
-              ""|/*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
+              "") continue ;;
+              /*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
             esac
           done < <(tar -tzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz")
           mkdir "$RUNNER_TEMP/v2"
