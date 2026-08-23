@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   OBSIDIAN_VERSION: "1.13.7"
@@ -52,6 +52,37 @@ jobs:
           git diff -- src scripts tests > ruff-autofix.patch
           tar -czf ruff-autofix-tree.tar.gz src scripts tests
           cat ruff-after-3.11.json
+      - name: Apply verified Ruff corrections and push
+        if: failure() && matrix.python-version == '3.11' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git fetch origin "$HEAD_BRANCH"
+          git checkout -B "$HEAD_BRANCH" "origin/$HEAD_BRANCH"
+          ruff format src scripts tests
+          ruff check src scripts tests --fix || true
+          ruff format src scripts tests
+          python .github/ci/fix_ruff.py
+          ruff format src scripts tests
+          ruff check src scripts tests
+          python -m compileall -q src scripts tests
+          python -m unittest discover -s tests -v
+          python -m pytest -q
+          kb --vault examples/sample-vault index --rebuild
+          kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
+          python benchmarks/run.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src scripts tests
+          if git diff --cached --quiet; then
+            echo "No Ruff corrections were produced" >&2
+            exit 1
+          fi
+          git commit -m "style: fix Ruff violations"
+          git push origin "HEAD:$HEAD_BRANCH"
       - name: Upload Ruff diagnostics
         if: always()
         uses: actions/upload-artifact@v4
