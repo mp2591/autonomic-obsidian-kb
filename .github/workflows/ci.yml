@@ -172,7 +172,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          mapfile -d '' tracked < <(git diff --name-only -z)
+          mapfile -d '' tracked < <(git diff --name-only --diff-filter=ACMRTUXB -z)
           mapfile -d '' deleted < <(git diff --name-only --diff-filter=D -z)
           mapfile -d '' untracked < <(git ls-files --others --exclude-standard -z)
           if ((${#tracked[@]})); then git add -- "${tracked[@]}"; fi
