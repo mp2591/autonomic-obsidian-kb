@@ -1,4 +1,4 @@
-name: V2 recovery
+name: V2 reconciliation
 
 on:
   pull_request:
@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 jobs:
-  materialize-v2:
-    name: Materialize verified v2 source
+  reconcile-v2:
+    name: Reconcile omitted v2 files
     if: github.event_name == 'pull_request' && github.head_ref == 'feat/sota-memory-v2'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -31,38 +31,87 @@ jobs:
           echo "0c390ca9e64dd1701823f28f8909c64037b6141724fcaa76eacd16f67cf625b3  $RUNNER_TEMP/sota-v2-overlay.tar.gz" | sha256sum --check
           mkdir "$RUNNER_TEMP/v2"
           tar -xzf "$RUNNER_TEMP/sota-v2-overlay.tar.gz" -C "$RUNNER_TEMP/v2"
-      - name: Overlay source while preserving workflow files
+      - name: Copy exact omitted files
         shell: bash
         run: |
           set -euo pipefail
-          rsync -a --exclude='.git/' --exclude='.pytest_cache/' "$RUNNER_TEMP/v2/" ./
-          rm -rf .ci-bootstrap
+          paths=(
+            .gitignore
+            AGENTS.md
+            README.md
+            docs/testing.md
+            docs/roadmap.md
+            docs/evaluation-v2.md
+            docs/state-of-the-art-v2.md
+            docs/token-economics.md
+            docs/security.md
+            docs/architecture.md
+            docs/autonomic-lifecycle.md
+            docs/retrieval-v2.md
+            docs/evidence-model.md
+            docs/schema.md
+            docs/retrieval.md
+            docs/adversarial-testing.md
+            docs/benchmark.md
+            docs/security-v2.md
+            src/autonomic_kb/compiler.py
+            src/autonomic_kb/query_plan.py
+            src/autonomic_kb/replay.py
+            tests/test_v2_adversarial.py
+            tests/test_v2_incremental.py
+          )
+          for path in "${paths[@]}"; do
+            test -f "$RUNNER_TEMP/v2/$path"
+            mkdir -p "$(dirname "$path")"
+            cp "$RUNNER_TEMP/v2/$path" "$path"
+          done
           rm -f examples/sample-vault/.kb/code-graph.json examples/sample-vault/.kb/traces.jsonl
-          git restore --source=HEAD -- .github/workflows/ci.yml .github/workflows/bootstrap-sota-v2.yml
-      - name: Verify source
+          git diff --check
+      - name: Verify reconciled v2 tree
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install -e '.[dev]'
           python -m compileall -q src scripts tests
           python -m unittest discover -s tests -v
-          pytest
+          python -m pytest -q
+          python -m unittest tests.test_v2_adversarial tests.test_v2_incremental -v
           kb --vault examples/sample-vault index --rebuild
           kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
           python benchmarks/run.py
-          git diff --check
-      - name: Commit and push non-workflow source
+      - name: Commit and push reconciled non-workflow files
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          mapfile -d '' tracked < <(git diff --name-only --diff-filter=ACMRTUXB -z)
-          mapfile -d '' deleted < <(git diff --name-only --diff-filter=D -z)
-          mapfile -d '' untracked < <(git ls-files --others --exclude-standard -z)
-          if ((${#tracked[@]})); then git add -- "${tracked[@]}"; fi
-          if ((${#deleted[@]})); then git add -u -- "${deleted[@]}"; fi
-          if ((${#untracked[@]})); then git add -- "${untracked[@]}"; fi
+          paths=(
+            .gitignore
+            AGENTS.md
+            README.md
+            docs/testing.md
+            docs/roadmap.md
+            docs/evaluation-v2.md
+            docs/state-of-the-art-v2.md
+            docs/token-economics.md
+            docs/security.md
+            docs/architecture.md
+            docs/autonomic-lifecycle.md
+            docs/retrieval-v2.md
+            docs/evidence-model.md
+            docs/schema.md
+            docs/retrieval.md
+            docs/adversarial-testing.md
+            docs/benchmark.md
+            docs/security-v2.md
+            src/autonomic_kb/compiler.py
+            src/autonomic_kb/query_plan.py
+            src/autonomic_kb/replay.py
+            tests/test_v2_adversarial.py
+            tests/test_v2_incremental.py
+          )
+          git add -f -- "${paths[@]}"
+          git add -u -- examples/sample-vault/.kb/code-graph.json examples/sample-vault/.kb/traces.jsonl || true
           if git diff --cached --name-only | grep -q '^\.github/workflows/'; then
             echo 'Workflow path unexpectedly staged' >&2
             exit 1
@@ -70,5 +119,5 @@ jobs:
           git diff --cached --check
           git diff --cached --stat
           test -n "$(git diff --cached --name-only)"
-          git commit -m 'Implement evidence-driven autonomic memory v2'
+          git commit -m 'Complete v2 docs modules and adversarial tests'
           git push origin HEAD:feat/sota-memory-v2
