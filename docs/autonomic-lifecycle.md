@@ -1,5 +1,7 @@
 # Autonomic lifecycle v2
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 The system uses evidence-backed control loops rather than treating every agent utterance as memory.
 
 ## Learn
@@ -12,7 +14,7 @@ Repeated or high-value observations may be consolidated from episodes into seman
 
 ## Validate
 
-Schema, evidence digests, links, temporal conflicts, source hashes, repository containment and allowlisted executable validators are checked. Validation work can be prioritized by stale probability × reuse × harm / cost.
+Schema, evidence digests, links, temporal conflicts, source hashes, repository containment and non-executable source validators are checked. Validation work can be prioritized by stale probability × reuse × harm / cost.
 
 ## Heal
 

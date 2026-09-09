@@ -100,7 +100,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=real-obsidian-${{ env.OBSIDIAN_VERSION }}-v2
       - name: Run Obsidian in Ozone headless mode and execute contract tests
         run: |
-          docker run --rm --init \
+          docker run --rm \
             --network=none \
             --shm-size=1g \
             -e OBSIDIAN_VERSION="$OBSIDIAN_VERSION" \

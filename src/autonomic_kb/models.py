@@ -1,11 +1,30 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 from .markdown import ParsedMarkdown, parse_markdown
 from .util import estimate_tokens, sha256_text
+
+
+@lru_cache(maxsize=2)
+def metadata_validator(version: int) -> Draft202012Validator:
+    schema = json.loads(files("autonomic_kb").joinpath("data/memory.schema.json").read_text(encoding="utf-8"))
+    if version == 1:
+        schema["required"] = ["id", "title", "type", "scope"]
+        schema["properties"]["schema_version"] = {"const": 1}
+        schema["properties"]["id"] = {"type": "string", "minLength": 1}
+        # Legacy instructions still go through the non-bypassable instruction gate.
+        schema.pop("allOf", None)
+    return Draft202012Validator(schema)
+
 
 SCHEMA_VERSION = 2
 VALID_TYPES = {
@@ -105,7 +124,10 @@ class MemoryRecord:
         fallback = f"path:{Path(path).with_suffix('').as_posix()}"
         memory_id = declared_id or fallback
         memory_type = str(metadata.get("type", "fact"))
-        schema_version = int(metadata.get("schema_version", 1) or 1)
+        try:
+            schema_version = int(metadata.get("schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 0
         title = str(metadata.get("title") or Path(path).stem.replace("-", " ").title())
         summary = str(metadata.get("summary") or parsed.layers.get(1, ""))
         try:
@@ -125,6 +147,19 @@ class MemoryRecord:
             else ("id", "title", "type", "scope", "status", "summary", "confidence", "authority", "updated")
         )
         schema_valid = all(metadata.get(key) not in (None, "") for key in required)
+        schema_valid = (
+            schema_valid and schema_version in {1, 2} and math.isfinite(confidence) and math.isfinite(utility)
+        )
+        schema_valid = schema_valid and metadata_validator(schema_version).is_valid(metadata)
+        if not math.isfinite(confidence):
+            confidence = 0.0
+        if not math.isfinite(utility):
+            utility = 0.0
+        try:
+            token_cost = max(0, int(metadata.get("token_cost") or estimate_tokens(text)))
+        except (ValueError, TypeError):
+            token_cost = estimate_tokens(text)
+            schema_valid = False
         return cls(
             id=memory_id,
             path=path,
@@ -152,7 +187,7 @@ class MemoryRecord:
             version_range=str(validity.get("version_range", "")),
             taint=str(metadata.get("taint", "unknown")),
             authorized_instruction=bool(metadata.get("authorized_instruction", False)),
-            token_cost=int(metadata.get("token_cost") or estimate_tokens(text)),
+            token_cost=token_cost,
             utility=max(0.0, min(1.0, utility)),
             layers=parsed.layers,
             body=parsed.body,
@@ -187,6 +222,8 @@ class TaskContext:
     session: str = ""
     task_types: list[str] = field(default_factory=list)
     risk: str = "normal"
+    at: str = ""
+    versions: dict[str, str] = field(default_factory=dict)
 
     @property
     def task_hash(self) -> str:
@@ -208,6 +245,7 @@ class RetrievalItem:
     evidence: list[str] = field(default_factory=list)
     uncertainty: float = 0.0
     route_sources: list[str] = field(default_factory=list)
+    revision: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -225,6 +263,9 @@ class RetrievalManifest:
     route: str = "lexical"
     state: str = "sufficient_context"
     trace_id: str = ""
+    missing_evidence: list[str] = field(default_factory=list)
+    token_count_exact: bool = False
+    delivery: str | None = None
 
     @property
     def remaining_tokens(self) -> int:
@@ -240,35 +281,32 @@ class RetrievalManifest:
             "remaining_tokens": self.remaining_tokens,
             "route": self.route,
             "state": self.state,
+            "missing_evidence": self.missing_evidence,
+            "token_count_exact": self.token_count_exact,
             "context": asdict(self.context),
             "items": [item.to_dict() for item in self.items],
             "excluded": self.excluded,
         }
 
     def to_markdown(self) -> str:
-        lines = [
-            f"# KB context manifest ({self.used_tokens}/{self.budget} estimated tokens)",
-            "",
-            f"State: `{self.state}` · Route: `{self.route}`",
-            f"Task: {self.task}",
-            f"Retrieval: `{self.retrieval_id}`",
-            "",
-        ]
-        if not self.items:
-            lines.append("No memory cleared the relevance, scope, trust, validity, and token-cost gates.")
-            return "\n".join(lines) + "\n"
+        if self.delivery is not None:
+            return self.delivery
+        lines = [f"State: {self.state}", f"Route: {self.route}"]
+        if self.missing_evidence:
+            lines.append("Missing: " + ", ".join(self.missing_evidence))
         for item in self.items:
-            lines.extend(
-                [
-                    f"## {item.title} (`{item.id}` · L{item.layer} · {item.tokens} tokens · score {item.score:.3f})",
-                    "",
-                    item.text.strip(),
-                    "",
-                    f"Why: {'; '.join(item.reasons)}",
-                    "",
-                ]
-            )
+            lines.extend(["", f"## {item.title} [{item.id}]", item.text.strip()])
         return "\n".join(lines).rstrip() + "\n"
+
+    def to_agent_dict(self) -> dict[str, Any]:
+        """Minimal model-visible JSON; to_dict remains explicit diagnostic output."""
+        return {
+            "text": self.to_markdown(),
+            "authorizes_action": False,
+            "retrieval_id": self.retrieval_id,
+            "state": self.state,
+            "token_count_exact": self.token_count_exact,
+        }
 
 
 @dataclass(slots=True)

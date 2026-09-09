@@ -114,12 +114,21 @@ def trust_gate(
     if status == "conflicted":
         return False, "unresolved contradiction"
     authorized, reason = instruction_authorized(memory_type, authority, authorized_instruction, taint)
-    if not authorized and not allow_untrusted:
+    if not authorized:
         return False, reason
     if authority == "untrusted" and not allow_untrusted:
         return False, "untrusted provenance"
-    if taint == "hostile" and not allow_untrusted:
+    if taint == "hostile":
         return False, "hostile provenance taint"
     if confidence < 0.35 and not allow_untrusted:
         return False, f"confidence {confidence:.2f} below trust gate"
     return True, "passed trust gate"
+
+
+def reject_secrets(value: object) -> None:
+    """Check the complete object before persistence; never include its secret in errors."""
+    import json
+
+    text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
+    if any(finding.category == "secret" for finding in scan_content(text)):
+        raise ValueError("refusing to persist secret-bearing content")

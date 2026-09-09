@@ -60,9 +60,13 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
         try:
             loaded = yaml.safe_load(raw)
             if isinstance(loaded, dict):
-                return loaded, text[match.end() :]
+                # YAML dates are a native Obsidian property type. Canonicalize them
+                # before schema validation; reject cycles/non-finite scalar data.
+                normalized = json.loads(json.dumps(loaded, default=str, allow_nan=False))
+                return normalized, text[match.end() :]
+            return {}, text[match.end() :]
         except Exception:
-            pass
+            return {"_parse_error": "invalid YAML metadata"}, text[match.end() :]
     metadata: dict[str, Any] = {}
     key: str | None = None
     list_values: list[Any] | None = None
@@ -129,15 +133,13 @@ def dump_frontmatter(metadata: dict[str, Any]) -> str:
     for key in keys:
         value = metadata[key]
         if isinstance(value, str):
-            if not value or value != value.strip() or any(ch in value for ch in ":#[]{}\n"):
-                rendered = json.dumps(value, ensure_ascii=False)
-            else:
-                rendered = value
+            # Always quote strings: "off", "false", and dates must not change type.
+            rendered = json.dumps(value, ensure_ascii=False)
         elif value is None:
             rendered = "null"
         elif isinstance(value, bool):
             rendered = "true" if value else "false"
-        elif isinstance(value, (dict, list)):
+        elif isinstance(value, dict | list):
             rendered = stable_json(value)
         else:
             rendered = str(value)

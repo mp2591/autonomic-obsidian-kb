@@ -7,7 +7,8 @@ from typing import Any
 
 from .config import KBConfig
 from .evidence import EvidenceStore
-from .util import atomic_write, sha256_text, utc_now
+from .security import scan_content
+from .util import atomic_write, utc_now
 
 
 @dataclass(slots=True)
@@ -24,6 +25,8 @@ class Episode:
     failed_hypotheses: list[str] = field(default_factory=list)
     successful_actions: list[str] = field(default_factory=list)
     outcome: str = "unknown"
+    preconditions: list[str] = field(default_factory=list)
+    verification: str = ""
     correction: str = ""
     created_at: str = ""
     evidence: list[str] = field(default_factory=list)
@@ -38,6 +41,9 @@ class EpisodeStore:
         self.evidence = EvidenceStore(config)
 
     def capture(self, task: str, **values: Any) -> Episode:
+        raw_candidate = json.dumps({"task": task, **values}, sort_keys=True, ensure_ascii=False, default=str)
+        if any(item.category == "secret" for item in scan_content(raw_candidate)):
+            raise ValueError("refusing to persist secret-bearing episode")
         episode = Episode(episode_id=f"episode:{uuid.uuid4().hex}", task=task, created_at=utc_now(), **values)
         raw = json.dumps(episode.to_dict(), sort_keys=True, ensure_ascii=False)
         evidence = self.evidence.put(
@@ -62,13 +68,13 @@ class EpisodeStore:
                 continue
         return result
 
-    def recurrence(self, signature: str) -> int:
-        target = sha256_text(signature.lower())[:16]
-        count = 0
+    def recurrence(self, signature: str, repository_id: str = "") -> int:
+        normalized = " ".join(signature.lower().split())
+        independent = set()
         for episode in self.all():
-            corpus = "\n".join(
-                [episode.task, *episode.observations, *episode.failed_hypotheses, *episode.successful_actions]
-            )
-            if sha256_text(corpus.lower())[:16] == target or signature.lower() in corpus.lower():
-                count += 1
-        return count
+            if episode.repository_id != repository_id:
+                continue
+            observations = episode.observations + episode.failed_hypotheses + episode.successful_actions
+            if normalized in {" ".join(value.lower().split()) for value in observations}:
+                independent.add((episode.task, episode.commit, tuple(episode.evidence[:-1])))
+        return len(independent)

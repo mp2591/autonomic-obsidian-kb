@@ -1,5 +1,7 @@
 # Evaluation and benchmark design
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 V2 keeps the original deterministic proxy as a fast regression guardrail, but does not treat it as proof of real token savings.
 
 ## Deterministic layer

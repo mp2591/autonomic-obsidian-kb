@@ -49,7 +49,7 @@ class LocalEmbeddingBackend:
     def search(self, index: KnowledgeIndex, query: str, limit: int = 50) -> list[dict[str, Any]]:
         if not self.available:
             return []
-        notes = index.all_notes({"active", "stale", "conflicted"})
+        notes = index.candidate_notes()
         cache: dict[str, Any] = {}
         if self.cache_path.exists():
             try:

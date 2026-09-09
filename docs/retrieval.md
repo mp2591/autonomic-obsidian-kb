@@ -1,5 +1,7 @@
 # Retrieval v2
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 Retrieval minimizes expected task cost rather than dumping a fixed top-k.
 
 ## Inputs
