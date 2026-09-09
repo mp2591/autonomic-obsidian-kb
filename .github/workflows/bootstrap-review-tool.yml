@@ -1,0 +1,22 @@
+name: Provision offline review tool
+on:
+  push:
+    branches: [fix/evidence-context-v3-20260909]
+    paths: [.github/workflows/bootstrap-review-tool.yml]
+permissions:
+  contents: read
+jobs:
+  lint-tool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download pinned lint wheel
+        run: python -m pip download --only-binary=:all: --no-deps --dest /tmp/lint-tool ruff==0.9.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-ruff-0.9.0
+          path: /tmp/lint-tool
+          retention-days: 1
