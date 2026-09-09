@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .util import atomic_write, stable_json, utc_now
+from .util import atomic_write, sha256_text, stable_json, utc_now
 
 
 @dataclass(slots=True)
@@ -26,8 +26,7 @@ class ContextStateStore:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, session: str) -> Path:
-        safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in session)[:120] or "default"
-        return self.root / f"{safe}.json"
+        return self.root / f"{sha256_text(session)}.json"
 
     def get(self, session: str) -> ContextInventory | None:
         path = self._path(session)
@@ -35,7 +34,9 @@ class ContextStateStore:
             return None
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
-            return ContextInventory(str(row.get("epoch", "")), dict(row.get("revisions", {})), str(row.get("updated_at", "")))
+            return ContextInventory(
+                str(row.get("epoch", "")), dict(row.get("revisions", {})), str(row.get("updated_at", ""))
+            )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 

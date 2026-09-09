@@ -8,7 +8,7 @@ from typing import Any
 from .config import KBConfig
 from .evidence import EvidenceStore
 from .security import scan_content
-from .util import atomic_write, sha256_text, utc_now
+from .util import atomic_write, utc_now
 
 
 @dataclass(slots=True)
@@ -25,6 +25,8 @@ class Episode:
     failed_hypotheses: list[str] = field(default_factory=list)
     successful_actions: list[str] = field(default_factory=list)
     outcome: str = "unknown"
+    preconditions: list[str] = field(default_factory=list)
+    verification: str = ""
     correction: str = ""
     created_at: str = ""
     evidence: list[str] = field(default_factory=list)
@@ -66,13 +68,13 @@ class EpisodeStore:
                 continue
         return result
 
-    def recurrence(self, signature: str) -> int:
-        target = sha256_text(signature.lower())[:16]
-        count = 0
+    def recurrence(self, signature: str, repository_id: str = "") -> int:
+        normalized = " ".join(signature.lower().split())
+        independent = set()
         for episode in self.all():
-            corpus = "\n".join(
-                [episode.task, *episode.observations, *episode.failed_hypotheses, *episode.successful_actions]
-            )
-            if sha256_text(corpus.lower())[:16] == target or signature.lower() in corpus.lower():
-                count += 1
-        return count
+            if episode.repository_id != repository_id:
+                continue
+            observations = episode.observations + episode.failed_hypotheses + episode.successful_actions
+            if normalized in {" ".join(value.lower().split()) for value in observations}:
+                independent.add((episode.task, episode.commit, tuple(episode.evidence[:-1])))
+        return len(independent)

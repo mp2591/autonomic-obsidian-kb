@@ -21,7 +21,7 @@ class ShadowEvaluator:
             retriever = Retriever(self.config, index)
             for route in routes:
                 manifest = retriever.retrieve(
-                    task, budget=budget, paths=paths or [], agent="shadow", route_override=route
+                    task, budget=budget, paths=paths or [], agent="shadow", route_override=route, record=False
                 )
                 outputs[route] = {
                     "state": manifest.state,

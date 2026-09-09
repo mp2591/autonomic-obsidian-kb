@@ -120,7 +120,7 @@ class TraceBenchmarkRunner:
 
     def run(self) -> dict[str, Any]:
         summary = TelemetryStore(self.config).paired_summary()
-        items = summary["items"]
+        items = [item for item in summary["items"] if item.get("matched") and item.get("usage_complete")]
 
         def mean_known(field: str) -> float | None:
             values = [item[field] for item in items if item.get(field) is not None]
@@ -128,9 +128,10 @@ class TraceBenchmarkRunner:
 
         return {
             "created_at": utc_now(),
-            "pairs": summary["pairs"],
+            "pairs": len(items),
+            "descriptive_pairs": summary["pairs"],
             "complete_usage_pairs": summary.get("complete_usage_pairs", 0),
-            "mean_success_delta": round(sum(item["success_delta"] for item in items) / max(1, len(items)), 4),
+            "mean_success_delta": mean_known("success_delta"),
             "mean_token_delta": mean_known("token_delta"),
             "mean_search_delta": mean_known("search_delta"),
             "mean_read_delta": mean_known("read_delta"),

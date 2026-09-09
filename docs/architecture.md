@@ -1,5 +1,7 @@
 # Architecture
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 `autonomic-obsidian-kb` v0.2 is an evidence-preserving adaptive memory compiler for AI agents. Obsidian Markdown remains the durable human semantic projection; all retrieval accelerators are derived and rebuildable.
 
 ## Durable state

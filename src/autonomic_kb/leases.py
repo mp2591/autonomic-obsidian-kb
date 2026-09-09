@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .config import KBConfig
+from .security import reject_secrets
+from .storage import vault_lock
 from .util import atomic_write, parse_time, sha256_text
 
 
@@ -30,6 +33,11 @@ class LeaseStore:
         config.ensure_runtime()
 
     def acquire(self, task: str, agent: str, scope: str = "repository", ttl_minutes: int = 30) -> TaskLease:
+        reject_secrets([task, agent])
+        with vault_lock(self.config.vault):
+            return self._acquire(task, agent, scope, ttl_minutes)
+
+    def _acquire(self, task: str, agent: str, scope: str, ttl_minutes: int) -> TaskLease:
         signature = sha256_text(task.strip().lower())[:20]
         existing = self.find(signature)
         if existing:
@@ -53,7 +61,7 @@ class LeaseStore:
     def find(self, task_or_signature: str) -> TaskLease | None:
         signature = (
             task_or_signature
-            if len(task_or_signature) == 20 and " " not in task_or_signature
+            if re.fullmatch(r"[a-f0-9]{20}", task_or_signature)
             else sha256_text(task_or_signature.strip().lower())[:20]
         )
         path = self.config.lease_dir / f"{signature}.json"
@@ -70,6 +78,10 @@ class LeaseStore:
         return lease
 
     def release(self, task_or_signature: str, agent: str = "") -> bool:
+        with vault_lock(self.config.vault):
+            return self._release(task_or_signature, agent)
+
+    def _release(self, task_or_signature: str, agent: str) -> bool:
         lease = self.find(task_or_signature)
         if not lease:
             return False

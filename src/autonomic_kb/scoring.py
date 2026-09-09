@@ -5,10 +5,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .git_context import is_ancestor
 from .models import TaskContext
 from .security import trust_gate
-from .util import age_days, is_time_active, jaccard, terms
+from .util import age_days, jaccard, terms
 
 POLICY_VERSION = "rank-v2.1"
 TYPE_TERMS = {
@@ -66,22 +65,16 @@ def _matches_path(pattern: str, paths: list[str]) -> bool:
     normalized = pattern.replace("\\", "/").lstrip("./")
     return any(
         fnmatch.fnmatch(path.replace("\\", "/").lstrip("./"), normalized)
-        or path.replace("\\", "/").lstrip("./").startswith(normalized.rstrip("*/"))
+        or path.replace("\\", "/").lstrip("./").startswith(normalized.rstrip("*/") + "/")
         for path in paths
     )
 
 
 def temporal_gate(note: dict[str, Any], context: TaskContext, repo_path: Path | None = None) -> tuple[bool, str, float]:
-    if not is_time_active(str(note.get("valid_from", "")), str(note.get("valid_to", ""))):
-        return False, "outside valid-time interval", 0.0
-    as_of = str(note.get("as_of_commit", ""))
-    if as_of and context.head:
-        if as_of == context.head:
-            return True, "commit validity exact", 1.0
-        if repo_path and is_ancestor(repo_path, as_of, context.head):
-            return True, "commit validity inherited through ancestry", 0.92
-        return False, f"memory commit {as_of[:10]} is not in active lineage", 0.0
-    return True, "temporally applicable", 0.82
+    from .applicability import applicability_gate
+
+    accepted, reason = applicability_gate(note, context, repo_path)
+    return accepted, reason, (1.0 if accepted else 0.0)
 
 
 def scope_gate(note: dict[str, Any], context: TaskContext, allow_cross_repo: bool = False) -> tuple[bool, str, float]:
@@ -96,7 +89,7 @@ def scope_gate(note: dict[str, Any], context: TaskContext, allow_cross_repo: boo
         return True, "global scope", 0.52
     if scope == "user":
         return True, "user scope", 0.6
-    if note_repo_id and context.repository_id and note_repo_id != context.repository_id and not allow_cross_repo:
+    if note_repo_id and note_repo_id != context.repository_id and not allow_cross_repo:
         return False, "repository identity mismatch", 0.0
     if (
         not note_repo_id
@@ -165,7 +158,7 @@ def feature_vector(note: dict[str, Any], context: TaskContext, repo_path: Path |
         evidence = [evidence]
     evidence_strength = min(
         1.0,
-        0.25 * len(evidence)
+        0.25 * len(set(str(value) for value in evidence))
         + (0.3 if note.get("authority") in {"source-of-truth", "verified", "user-corrected"} else 0.0),
     )
     return {
@@ -192,6 +185,7 @@ def score_note(
     repo_path: Path | None = None,
     weights: dict[str, float] | None = None,
     intercept: float = 0.0,
+    calibrated: bool = False,
 ) -> tuple[float, list[str], str | None]:
     accepted, trust_reason = trust_gate(
         str(note.get("status", "active")),
@@ -227,6 +221,10 @@ def score_note(
         "query_overlap": 0.02,
     }
     soft = intercept + sum(float(learned.get(key, 0.0)) * float(f.get(key, 0.0)) for key in learned)
+    if calibrated:
+        import math
+
+        soft = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, soft))))
     score = soft + 0.10 * scope_score + 0.02 * temporal_score
     if note.get("graph_relation"):
         score += 0.035

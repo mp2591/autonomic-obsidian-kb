@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -10,6 +9,7 @@ from .config import KBConfig
 from .evidence import OperationLedger
 from .index import KnowledgeIndex
 from .markdown import dump_frontmatter, parse_markdown
+from .storage import semantic_transaction
 from .util import age_days, atomic_write, jaccard, sha256_text, slugify, utc_now
 from .validation import ValidationReport, Validator
 
@@ -30,6 +30,10 @@ class HealingAction:
         return asdict(self)
 
 
+class _HealingRegression(ValueError):
+    pass
+
+
 class Healer:
     def __init__(self, config: KBConfig, index: KnowledgeIndex | None = None):
         self.config = config
@@ -45,45 +49,39 @@ class Healer:
         validator = Validator(self.config, self.index)
         before = validator.validate()
         actions = self.plan(before)
-        changed: list[tuple[Path, Path]] = []
+        rolled_back = False
         if apply:
-            for action in actions:
-                if action.safe:
-                    backup = self._apply(action)
-                    if backup:
-                        changed.append(backup)
-            self.index.index_vault(force=True)
-            after = validator.validate()
-            if after.errors > before.errors:
-                for source, backup in reversed(changed):
-                    if backup.exists():
-                        source.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(backup, source)
-                self.index.index_vault(force=True)
+            try:
+                with semantic_transaction(self.config.vault):
+                    for action in actions:
+                        if action.safe:
+                            self._apply(action)
+                    self.index.index_vault(force=True)
+                    after = validator.validate()
+                    old_errors = {
+                        (issue.code, issue.path) for issue in before.issues if issue.severity in {"error", "critical"}
+                    }
+                    new_errors = {
+                        (issue.code, issue.path) for issue in after.issues if issue.severity in {"error", "critical"}
+                    }
+                    if new_errors - old_errors:
+                        raise _HealingRegression("healing introduced a new validation error")
+            except _HealingRegression:
+                rolled_back = True
                 for action in actions:
                     action.applied = False
-                rollback = True
-                final = validator.validate()
-            else:
-                rollback = False
-                final = after
-        else:
-            rollback = False
-            final = before
-        contradictions = [issue.to_dict() for issue in before.issues if issue.code == "contradiction"]
-        if contradictions:
-            (self.config.runtime_dir / "contradictions.json").write_text(
-                json.dumps(contradictions, indent=2), encoding="utf-8"
-            )
+            finally:
+                self.index.index_vault(force=True)
+        final = validator.validate() if apply else before
         result = {
             "mode": "apply" if apply else "dry-run",
             "validation": final.to_dict(),
             "actions": [action.to_dict() for action in actions],
             "applied": sum(action.applied for action in actions),
-            "rolled_back": rollback,
+            "rolled_back": rolled_back,
         }
         self.index.events.emit(
-            "heal.completed", mode=result["mode"], planned=len(actions), applied=result["applied"], rolled_back=rollback
+            "heal.completed", mode=result["mode"], applied=result["applied"], rolled_back=rolled_back
         )
         return result
 
@@ -173,7 +171,7 @@ class Healer:
             }
             fields = action.details.get("fields", []) if action.details else []
             for field in fields:
-                if field and metadata.get(field) in {None, ""} and field in defaults:
+                if field and metadata.get(field) in (None, "") and field in defaults:
                     metadata[field] = defaults[field]
             atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
             action.applied = True
@@ -250,6 +248,15 @@ class Compactor:
             text = str(note.get("l2") or note.get("summary", ""))
             for prior in notes[:i]:
                 if note.get("scope") != prior.get("scope") or note.get("type") != prior.get("type"):
+                    continue
+                if any(
+                    note.get(key) != prior.get(key) for key in ("repository_id", "branch", "valid_from", "valid_to")
+                ):
+                    continue
+                if any(
+                    note["metadata"].get(key) != prior["metadata"].get(key)
+                    for key in ("preconditions", "verification", "dependencies", "evidence", "version_package")
+                ):
                     continue
                 sim = jaccard(text, str(prior.get("l2") or prior.get("summary", "")))
                 if sim >= 0.97:

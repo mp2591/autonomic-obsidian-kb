@@ -1,5 +1,7 @@
 # Evidence, episodes and memory operations
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 V2 separates current semantic projection from the evidence and operations that created it.
 
 ## Evidence objects

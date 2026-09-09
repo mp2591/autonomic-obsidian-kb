@@ -76,7 +76,7 @@ class KBConfig:
 
     @property
     def feedback_path(self) -> Path:
-        return self.runtime_dir / "feedback.jsonl"
+        return self.vault / ".kb-feedback.jsonl"
 
     @property
     def evidence_dir(self) -> Path:
@@ -99,6 +99,13 @@ class KBConfig:
         return self.vault / "kb.toml"
 
     def ensure_runtime(self) -> None:
+        for relative in (self.inbox_dir, self.archive_dir, self.quarantine_dir):
+            candidate = (self.vault / relative).resolve()
+            if not candidate.is_relative_to(self.vault.resolve()):
+                raise ValueError("configured directory escaped vault")
+        for path in (self.feedback_path, self.vault / ".kb-outcomes.jsonl", self.vault / ".kb-transactions"):
+            if path.is_symlink() or not path.resolve().is_relative_to(self.vault.resolve()):
+                raise ValueError("KB state path escaped vault or is a symlink")
         for path in (
             self.runtime_dir,
             self.vault / self.inbox_dir,
@@ -109,6 +116,8 @@ class KBConfig:
             self.episode_dir,
             self.lease_dir,
         ):
+            if path.is_symlink() or not path.resolve().is_relative_to(self.vault.resolve()):
+                raise ValueError("KB state path escaped vault or is a symlink")
             path.mkdir(parents=True, exist_ok=True)
 
     @classmethod

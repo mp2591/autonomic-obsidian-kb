@@ -1,26 +1,7 @@
-# Roadmap after v0.2
+# Evidence-gated roadmap after V3
 
-V0.2 implements the correctness/measurement foundation: evidence and operation ledgers, schema v2, incremental indexing, adaptive routes, RRF, calibrated soft ranking, set allocation, temporal validity, executable validation, taint/authorization, task outcomes, shadow replay, leases and adversarial tests.
+Version 0.3.0 connects source-aware retrieval, bounded payloads, structural sufficiency, grounded procedural candidates, host-acknowledged context deltas, durable outcomes, safer replay, and transactional edits. The [implementation map](v3-implementation.md) distinguishes actual code from research directions.
 
-## Evidence-gated next work
+Next changes require measured benefit over the simpler deployed path: richer language-specific definition/use/test graphs; sparse neural or late-interaction candidates; learned routing and validation scheduling trained on qualified task outcomes; semantic contradiction adjudication; branch-overlay materialization; signed producer/authorization attestations; distributed reconciliation; additional native Obsidian OS/architecture contracts; and a larger multi-repository, multi-agent replay corpus.
 
-- richer language-specific Tree-sitter/LSIF/code intelligence beyond the Python AST baseline;
-- sparse neural and late-interaction retrieval backends;
-- learned route selection after sufficient paired task traces;
-- stronger semantic contradiction/NLI adjudication for ambiguous cases;
-- value-of-information validation scheduling learned from outcomes;
-- branch-overlay materialization and context-delta protocol;
-- signed evidence/operation attestations for shared enterprise vaults;
-- macOS/Windows/ARM64 Obsidian compatibility matrix;
-- larger multi-repository coding-agent replay corpus.
-
-## Experimental only
-
-- reinforcement-learned memory operations;
-- unconstrained agentic semantic healing;
-- graph database migration;
-- automatic contradiction winner selection;
-- global shared vector namespace;
-- mandatory always-on daemon.
-
-None should become default without positive paired task utility and preserved safety.
+Unconstrained semantic healing, automatic contradiction winner selection, mandatory neural models, a graph-database migration, unrestricted global vector namespaces, or an always-on daemon must not become defaults merely because a paper uses them. Minimize necessary correct context, include all maintenance costs, and preserve hard gates.
