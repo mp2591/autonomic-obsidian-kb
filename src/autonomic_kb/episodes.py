@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import KBConfig
 from .evidence import EvidenceStore
+from .security import scan_content
 from .util import atomic_write, sha256_text, utc_now
 
 
@@ -38,6 +39,9 @@ class EpisodeStore:
         self.evidence = EvidenceStore(config)
 
     def capture(self, task: str, **values: Any) -> Episode:
+        raw_candidate = json.dumps({"task": task, **values}, sort_keys=True, ensure_ascii=False, default=str)
+        if any(item.category == "secret" for item in scan_content(raw_candidate)):
+            raise ValueError("refusing to persist secret-bearing episode")
         episode = Episode(episode_id=f"episode:{uuid.uuid4().hex}", task=task, created_at=utc_now(), **values)
         raw = json.dumps(episode.to_dict(), sort_keys=True, ensure_ascii=False)
         evidence = self.evidence.put(

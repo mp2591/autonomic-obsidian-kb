@@ -43,24 +43,29 @@ class TaskOutcome:
     task_hash: str
     kb_mode: str
     success: bool
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_tokens: int = 0
-    searches: int = 0
-    file_reads: int = 0
-    commands: int = 0
-    retries: int = 0
-    corrections: int = 0
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
+    cached_tokens: int | None = 0
+    searches: int | None = 0
+    file_reads: int | None = 0
+    commands: int | None = 0
+    retries: int | None = 0
+    corrections: int | None = 0
     latency_ms: float = 0.0
-    maintenance_tokens: int = 0
+    maintenance_tokens: int | None = 0
     unsafe: bool = False
     retrieved_ids: list[str] = field(default_factory=list)
     created_at: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    pair_id: str = ""
+    usage_complete: bool = True
 
     @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens + self.cached_tokens + self.maintenance_tokens
+    def total_tokens(self) -> int | None:
+        if self.input_tokens is None or self.output_tokens is None:
+            return None
+        # cached_tokens is a subset/accounting dimension for many providers; do not double-count it.
+        return self.input_tokens + self.output_tokens + (self.maintenance_tokens or 0)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -75,7 +80,13 @@ class TelemetryStore:
         self.outcome_path = config.runtime_dir / "outcomes.jsonl"
 
     def feedback(
-        self, retrieval_id: str, memory_id: str, kind: str, *, actor: str = "agent", notes: str = ""
+        self,
+        retrieval_id: str,
+        memory_id: str,
+        kind: str,
+        *,
+        actor: str = "agent",
+        notes: str = "",
     ) -> RetrievalFeedback:
         if kind not in FEEDBACK_KINDS:
             raise ValueError(f"unsupported feedback kind {kind!r}")
@@ -102,21 +113,37 @@ class TelemetryStore:
                 continue
         return result
 
+    @staticmethod
+    def _delta(a: Any, b: Any) -> int | None:
+        if a is None or b is None:
+            return None
+        return int(b) - int(a)
+
     def paired_summary(self) -> dict[str, Any]:
-        groups: dict[str, dict[str, dict[str, Any]]] = {}
+        groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
         for row in self.outcomes():
-            groups.setdefault(str(row.get("task_hash", "")), {})[str(row.get("kb_mode", ""))] = row
-        paired = []
-        for task_hash, modes in groups.items():
-            if "no-kb" in modes and "kb" in modes:
-                baseline, assisted = modes["no-kb"], modes["kb"]
-                paired.append(
-                    {
-                        "task_hash": task_hash,
-                        "success_delta": int(bool(assisted.get("success"))) - int(bool(baseline.get("success"))),
-                        "token_delta": int(assisted.get("total_tokens", 0)) - int(baseline.get("total_tokens", 0)),
-                        "search_delta": int(assisted.get("searches", 0)) - int(baseline.get("searches", 0)),
-                        "read_delta": int(assisted.get("file_reads", 0)) - int(baseline.get("file_reads", 0)),
-                    }
-                )
-        return {"pairs": len(paired), "items": paired}
+            key = str(row.get("pair_id") or row.get("task_hash", ""))
+            groups.setdefault(key, {}).setdefault(str(row.get("kb_mode", "")), []).append(row)
+        paired: list[dict[str, Any]] = []
+        for pair_id, modes in groups.items():
+            if len(modes.get("no-kb", [])) != 1 or len(modes.get("kb", [])) != 1:
+                continue
+            baseline, assisted = modes["no-kb"][0], modes["kb"][0]
+            paired.append(
+                {
+                    "pair_id": pair_id,
+                    "task_hash": assisted.get("task_hash") or baseline.get("task_hash"),
+                    "success_delta": int(bool(assisted.get("success"))) - int(bool(baseline.get("success"))),
+                    "token_delta": self._delta(baseline.get("total_tokens"), assisted.get("total_tokens")),
+                    "search_delta": self._delta(baseline.get("searches"), assisted.get("searches")),
+                    "read_delta": self._delta(baseline.get("file_reads"), assisted.get("file_reads")),
+                    "usage_complete": bool(
+                        baseline.get("usage_complete", True) and assisted.get("usage_complete", True)
+                    ),
+                }
+            )
+        return {
+            "pairs": len(paired),
+            "complete_usage_pairs": sum(bool(item["usage_complete"]) for item in paired),
+            "items": paired,
+        }

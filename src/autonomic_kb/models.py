@@ -225,6 +225,8 @@ class RetrievalManifest:
     route: str = "lexical"
     state: str = "sufficient_context"
     trace_id: str = ""
+    missing_evidence: list[str] = field(default_factory=list)
+    token_count_exact: bool = False
 
     @property
     def remaining_tokens(self) -> int:
@@ -240,35 +242,21 @@ class RetrievalManifest:
             "remaining_tokens": self.remaining_tokens,
             "route": self.route,
             "state": self.state,
+            "missing_evidence": self.missing_evidence,
+            "token_count_exact": self.token_count_exact,
             "context": asdict(self.context),
             "items": [item.to_dict() for item in self.items],
             "excluded": self.excluded,
         }
 
     def to_markdown(self) -> str:
-        lines = [
-            f"# KB context manifest ({self.used_tokens}/{self.budget} estimated tokens)",
-            "",
-            f"State: `{self.state}` · Route: `{self.route}`",
-            f"Task: {self.task}",
-            f"Retrieval: `{self.retrieval_id}`",
-            "",
-        ]
-        if not self.items:
-            lines.append("No memory cleared the relevance, scope, trust, validity, and token-cost gates.")
-            return "\n".join(lines) + "\n"
+        lines = [f"State: {self.state}", f"Route: {self.route}"]
+        if self.missing_evidence:
+            lines.append("Missing: " + ", ".join(self.missing_evidence))
         for item in self.items:
-            lines.extend(
-                [
-                    f"## {item.title} (`{item.id}` · L{item.layer} · {item.tokens} tokens · score {item.score:.3f})",
-                    "",
-                    item.text.strip(),
-                    "",
-                    f"Why: {'; '.join(item.reasons)}",
-                    "",
-                ]
-            )
+            lines.extend(["", f"## {item.title}", item.text.strip()])
         return "\n".join(lines).rstrip() + "\n"
+
 
 
 @dataclass(slots=True)

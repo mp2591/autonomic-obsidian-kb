@@ -84,7 +84,6 @@ class RepositoryCodeGraph:
                             )
                         )
                 if imports:
-                    nodes[-(1 if nodes else 0) :]
                     # Store imports on the file node.
                     for item in reversed(nodes):
                         if item.id == f"file:{relative}":
@@ -99,9 +98,20 @@ class RepositoryCodeGraph:
         if not self.cache_path.exists():
             return self.build()
         try:
-            return json.loads(self.cache_path.read_text(encoding="utf-8"))
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return self.build()
+        cached = data.get("files", {})
+        for relative, digest in cached.items():
+            path = self.repo / relative
+            if not path.exists():
+                return self.build()
+            try:
+                if sha256_file(path) != digest:
+                    return self.build()
+            except OSError:
+                return self.build()
+        return data
 
     def symbols_for_paths(self, paths: list[str]) -> list[str]:
         wanted = {Path(path).as_posix() for path in paths}

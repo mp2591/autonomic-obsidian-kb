@@ -6,7 +6,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import KBConfig
-from .util import atomic_write, sha256_text, utc_now
+from .security import scan_content
+from .util import atomic_write, sha256_text, stable_json, utc_now
 
 VALID_OPERATIONS = {
     "ADD",
@@ -77,7 +78,20 @@ class EvidenceStore:
         producer: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> EvidenceRecord:
-        digest = sha256_text(content)
+        findings = scan_content(content)
+        if any(item.category == "secret" for item in findings):
+            raise ValueError("refusing to persist secret-bearing evidence")
+        envelope = {
+            "kind": kind,
+            "subject": subject,
+            "repository_id": repository_id,
+            "commit": commit,
+            "path": path,
+            "content_digest": sha256_text(content),
+            "producer": producer,
+            "metadata": metadata or {},
+        }
+        digest = sha256_text(stable_json(envelope))
         evidence_id = f"evidence:sha256:{digest}"
         record = EvidenceRecord(
             evidence_id=evidence_id,
@@ -87,7 +101,7 @@ class EvidenceStore:
             commit=commit,
             path=path,
             content=content,
-            content_digest=digest,
+            content_digest=sha256_text(content),
             observed_at=utc_now(),
             producer=producer,
             metadata=metadata or {},
@@ -108,6 +122,18 @@ class EvidenceStore:
         except (ValueError, TypeError, json.JSONDecodeError):
             return None
         if record.content_digest != sha256_text(record.content):
+            return None
+        envelope = {
+            "kind": record.kind,
+            "subject": record.subject,
+            "repository_id": record.repository_id,
+            "commit": record.commit,
+            "path": record.path,
+            "content_digest": record.content_digest,
+            "producer": record.producer,
+            "metadata": record.metadata,
+        }
+        if digest != sha256_text(stable_json(envelope)):
             return None
         return record
 
