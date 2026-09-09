@@ -14,7 +14,8 @@ jobs:
         with:
           python-version: '3.13'
       - name: Download pinned lint wheel
-        run: python -m pip download --only-binary=:all: --no-deps --dest /tmp/lint-tool ruff==0.9.0
+        run: |
+          python -m pip download --only-binary=:all: --no-deps --dest /tmp/lint-tool ruff==0.9.0
       - uses: actions/upload-artifact@v4
         with:
           name: offline-ruff-0.9.0
