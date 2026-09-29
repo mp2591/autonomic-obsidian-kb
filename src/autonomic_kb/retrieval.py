@@ -24,7 +24,7 @@ from .security import reject_secrets
 from .semantic import LocalEmbeddingBackend
 from .sufficiency import assess_sufficiency, unrecorded_roles
 from .tokenizer import TOKENIZERS
-from .util import atomic_write, jaccard, sha256_text, stable_json, terms
+from .util import atomic_write, sha256_text, stable_json, terms
 
 _EXACTISH = re.compile(
     r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+|\b[A-Z][A-Za-z0-9_]{2,}\b|\b[a-z_][a-z0-9_]*\([^)]*\)|\b\w+\.\w+\b)"
@@ -178,6 +178,15 @@ class Retriever:
             eligible = []
             gate_exclusions = []
             evidence_store = EvidenceStore(self.config)
+            evidence_ok = self.index.evidence_valid(
+                evidence_store,
+                (
+                    str(identity)
+                    for note in notes
+                    if isinstance(note.get("metadata", {}).get("evidence", []), list)
+                    for identity in note.get("metadata", {}).get("evidence", [])
+                ),
+            )
             for note in notes:
                 allowed, reason = memory_read_gate(
                     note,
@@ -194,7 +203,7 @@ class Retriever:
                     and evidence
                     and (
                         not isinstance(evidence, list)
-                        or not all(evidence_store.verify(str(identity)) for identity in evidence)
+                        or not all(evidence_ok.get(str(identity), False) for identity in evidence)
                     )
                 ):
                     allowed, reason = False, "evidence missing or invalid"
@@ -322,13 +331,13 @@ class Retriever:
                 }
                 atomic_write(self.config.runtime_dir / "receipts" / f"{retrieval_id}.json", stable_json(receipt))
                 selected_ids = {item.id for item in manifest.items}
-                for _, note, _ in scored:
-                    self.index.record_rank_example(
-                        retrieval_id,
-                        note["id"],
-                        feature_vector(note, context, self.config.repo),
-                        note["id"] in selected_ids,
-                    )
+                self.index.record_rank_examples(
+                    retrieval_id,
+                    (
+                        (note["id"], feature_vector(note, context, self.config.repo), note["id"] in selected_ids)
+                        for _, note, _ in scored
+                    ),
+                )
             else:
                 return manifest
             for decision in decisions:
@@ -362,13 +371,25 @@ class Retriever:
         items: list[RetrievalItem] = []
         covered_types: set[str] = set()
         pool = list(scored)
+        expand = depth == "auto" and build_query_plan(context).intent in {"debug", "procedure"}
+        term_sets: dict[str, frozenset[str]] = {}
+
+        def term_set(text: str) -> frozenset[str]:
+            if text not in term_sets:
+                term_sets[text] = frozenset(terms(text))
+            return term_sets[text]
+
+        def overlap(left: str, right: str) -> float:
+            a, b = term_set(left), term_set(right)
+            return 1.0 if not a and not b else len(a & b) / max(1, len(a | b))
+
         while pool and remaining >= 20:
             best_index = -1
             best_gain = -1.0
             best_payload: tuple[int, str, int, float] | None = None
             for idx, (score, note, _) in enumerate(pool):
                 preferred, _ = self._select_layer(note, score, depth)
-                if depth == "auto" and build_query_plan(context).intent in {"debug", "procedure"}:
+                if expand:
                     preferred = max(preferred, 2)
                 layer, text = compile_task_view(note, context.task, preferred, max(0, remaining - 14), agent)
                 if not text:
@@ -376,7 +397,7 @@ class Retriever:
                 token_cost = TOKENIZERS.count(text, agent).tokens + 14
                 if token_cost > remaining:
                     continue
-                redundancy = max((jaccard(text, item.text) for item in items), default=0.0)
+                redundancy = max((overlap(text, item.text) for item in items), default=0.0)
                 novelty = 1.0 - redundancy
                 type_bonus = (
                     0.09 if note.get("type") in context.task_types and note.get("type") not in covered_types else 0.0

@@ -25,8 +25,11 @@ def memory_read_gate(
         return False, "invalid memory schema"
     if note.get("status") == "inbox":
         return False, "inbox memory is not promoted"
-    content = str(note.get("body", "")) + str(note.get("metadata", {}))
-    if scan_content(content):
+    # Indexed notes carry the verdict computed when their content last changed.
+    unsafe = note.get("unsafe")
+    if unsafe is None:
+        unsafe = bool(scan_content(str(note.get("body", "")) + str(note.get("metadata", {}))))
+    if unsafe:
         return False, "unsafe memory content"
     accepted, reason = trust_gate(
         str(note.get("status", "active")),

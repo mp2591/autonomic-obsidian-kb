@@ -72,28 +72,39 @@ LEDGER_DIRECTORY = ".kb-memory-events"
 JOURNAL_DIRECTORY = ".kb-transactions"
 
 
+def _walk(root: Path, suffix: str, *, skip_hidden: bool) -> Iterator[Path]:
+    """Deterministic walk that never follows or yields symlinks.
+
+    Without following symlinks every yielded file is inside ``root``, so no per-file
+    ``resolve()`` is needed.
+    """
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            continue
+        subdirectories = []
+        for entry in entries:
+            if (skip_hidden and entry.name.startswith(".")) or entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if entry.name not in EXCLUDED_DIRECTORIES:
+                    subdirectories.append(Path(entry.path))
+            elif entry.name.endswith(suffix) and entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
+        pending.extend(reversed(subdirectories))
+
+
 def vault_markdown_paths(vault: Path) -> Iterator[Path]:
-    """Every note Obsidian would show, in sorted order.
+    """Every note Obsidian would show, in a stable order.
 
     Hidden files and directories (``.obsidian``, ``.kb*``, ``.trash``, transaction snapshots)
     and symlinks are skipped, so every vault walk agrees on what a note is.
     """
-    root = vault.resolve()
-    for directory, subdirectories, filenames in os.walk(vault):
-        subdirectories[:] = sorted(
-            name
-            for name in subdirectories
-            if not name.startswith(".")
-            and name not in EXCLUDED_DIRECTORIES
-            and not os.path.islink(os.path.join(directory, name))
-        )
-        for name in sorted(filenames):
-            if name.startswith(".") or not name.endswith(".md"):
-                continue
-            path = Path(directory) / name
-            if path.is_symlink() or not path.resolve().is_relative_to(root):
-                continue
-            yield path
+    return _walk(vault, ".md", skip_hidden=True)
 
 
 def semantic_paths(vault: Path) -> list[Path]:
@@ -101,9 +112,7 @@ def semantic_paths(vault: Path) -> list[Path]:
     paths = list(vault_markdown_paths(vault))
     ledger = vault / LEDGER_DIRECTORY
     if ledger.is_dir() and not ledger.is_symlink():
-        paths.extend(
-            path for path in sorted(ledger.rglob("*.json")) if path.is_file() and not path.is_symlink()
-        )
+        paths.extend(_walk(ledger, ".json", skip_hidden=False))
     return paths
 
 

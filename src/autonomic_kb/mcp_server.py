@@ -390,11 +390,10 @@ class MCPServer:
         context = context or Retriever(self.config, index).build_context("inspect memory")
         allowed, _ = memory_read_gate(note, context, repo_path=self.config.repo)
         evidence = note.get("metadata", {}).get("evidence", [])
-        return (
-            allowed
-            and isinstance(evidence, list)
-            and all(EvidenceStore(self.config).verify(str(identity)) for identity in evidence)
-        )
+        if not allowed or not isinstance(evidence, list):
+            return False
+        verified = index.evidence_valid(EvidenceStore(self.config), (str(identity) for identity in evidence))
+        return all(verified.get(str(identity), False) for identity in evidence)
 
     def _visible_notes(self, index: KnowledgeIndex, context=None) -> list[dict[str, Any]]:
         index.index_vault()

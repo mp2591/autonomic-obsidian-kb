@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .config import KBConfig
@@ -112,11 +113,17 @@ class EvidenceStore:
             atomic_write(destination, json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n")
         return record
 
-    def get(self, evidence_id: str) -> EvidenceRecord | None:
+    def path_for(self, evidence_id: str) -> Path | None:
         if not re.fullmatch(r"evidence:sha256:[a-f0-9]{64}", evidence_id):
             return None
         digest = evidence_id.rsplit(":", 1)[-1]
-        path = self.config.evidence_dir / digest[:2] / f"{digest}.json"
+        return self.config.evidence_dir / digest[:2] / f"{digest}.json"
+
+    def get(self, evidence_id: str) -> EvidenceRecord | None:
+        path = self.path_for(evidence_id)
+        if path is None:
+            return None
+        digest = evidence_id.rsplit(":", 1)[-1]
         if (
             not path.exists()
             or path.is_symlink()

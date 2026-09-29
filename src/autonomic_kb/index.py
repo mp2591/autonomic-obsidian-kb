@@ -9,12 +9,17 @@ from pathlib import Path
 from typing import Any
 
 from .config import KBConfig
+from .evidence import EvidenceStore
 from .models import MemoryRecord
 from .observability import EventLog
+from .security import scan_content
 from .storage import recover_transactions, vault_lock, vault_markdown_paths
 from .util import sha256_text, stable_json, terms, utc_now
 
 SCHEMA_VERSION = 2
+# Bump whenever parsing or index-time verdicts (such as the content safety scan) change;
+# unchanged notes are then re-read once instead of trusting stale derived columns.
+PARSER_FORMAT = "v3.1.0"
 
 
 @dataclass(slots=True)
@@ -44,7 +49,7 @@ class KnowledgeIndex:
         self.fts5 = False
         self._ensure_schema()
         parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
-        self._requires_reparse = not parser or parser[0] != "v3.0.0"
+        self._requires_reparse = not parser or parser[0] != PARSER_FORMAT
         self.events = EventLog(config.log_path)
 
     def close(self) -> None:
@@ -110,6 +115,10 @@ class KnowledgeIndex:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, errors INTEGER NOT NULL,
                 warnings INTEGER NOT NULL, report_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS evidence_checks (
+                evidence_id TEXT PRIMARY KEY, inode INTEGER NOT NULL, file_size INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, valid INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS rank_examples (
                 retrieval_id TEXT NOT NULL, note_id TEXT NOT NULL, feature_json TEXT NOT NULL,
                 selected INTEGER NOT NULL, label REAL, created_at TEXT NOT NULL,
@@ -124,6 +133,10 @@ class KnowledgeIndex:
             CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_id,target);
             """
         )
+        note_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(notes)")}
+        if "unsafe" not in note_columns:
+            # Fail closed until the parser-format bump re-reads every note and stores its verdict.
+            self.connection.execute("ALTER TABLE notes ADD COLUMN unsafe INTEGER NOT NULL DEFAULT 1")
         manifest_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(file_manifest)")}
         if "inode" not in manifest_columns:
             # Replacing a file (as atomic writers do) changes its inode even when the coarse
@@ -170,8 +183,9 @@ class KnowledgeIndex:
             result = self._index_vault(force or self._requires_reparse)
             if self._requires_reparse:
                 self.connection.execute(
-                    "INSERT INTO meta(key,value) VALUES('parser_format','v3.0.0') "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+                    "INSERT INTO meta(key,value) VALUES('parser_format',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (PARSER_FORMAT,),
                 )
                 self.connection.commit()
                 self._requires_reparse = False
@@ -328,14 +342,16 @@ class KnowledgeIndex:
             record.source_hash,
             int(record.schema_valid),
             utc_now(),
+            # Same text the read gate would scan: body plus the stored metadata.
+            int(bool(scan_content(record.body + str(json.loads(stable_json(record.metadata)))))),
         )
         self.connection.execute(
             """INSERT INTO notes(
                 id,declared_id,path,schema_version,kind,title,type,scope,status,summary,confidence,authority,
                 repo,repository_id,project,module,branch,created,updated,validated,freshness,valid_from,valid_to,
                 as_of_commit,version_range,taint,authorized_instruction,token_cost,utility,l0,l1,l2,l3,l4,body,
-                metadata_json,source_hash,schema_valid,indexed_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                metadata_json,source_hash,schema_valid,indexed_at,unsafe
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             values,
         )
@@ -555,14 +571,66 @@ class KnowledgeIndex:
         self.connection.commit()
 
     def record_rank_example(self, retrieval_id: str, note_id: str, features: dict[str, float], selected: bool) -> None:
-        self.connection.execute(
+        self.record_rank_examples(retrieval_id, [(note_id, features, selected)])
+
+    def record_rank_examples(
+        self, retrieval_id: str, examples: Iterable[tuple[str, dict[str, float], bool]]
+    ) -> None:
+        now = utc_now()
+        self.connection.executemany(
             "INSERT INTO rank_examples"
             "(retrieval_id,note_id,feature_json,selected,label,created_at) VALUES(?,?,?,?,NULL,?) "
             "ON CONFLICT(retrieval_id,note_id) DO UPDATE SET "
             "feature_json=excluded.feature_json, selected=excluded.selected",
-            (retrieval_id, note_id, stable_json(features), int(selected), utc_now()),
+            [
+                (retrieval_id, note_id, stable_json(features), int(selected), now)
+                for note_id, features, selected in examples
+            ],
         )
         self.connection.commit()
+
+    def evidence_valid(self, store: EvidenceStore, identities: Iterable[str]) -> dict[str, bool]:
+        """Digest-verify evidence objects, re-reading only files whose stat identity changed.
+
+        The key includes ctime, which user space cannot set, so rewriting an evidence file
+        always forces re-verification.
+        """
+        wanted = sorted({str(identity) for identity in identities})
+        if not wanted:
+            return {}
+        wanted_set = set(wanted)
+        cached = {
+            row["evidence_id"]: row
+            for row in self.connection.execute("SELECT * FROM evidence_checks").fetchall()
+            if row["evidence_id"] in wanted_set
+        }
+        result: dict[str, bool] = {}
+        updates = []
+        for identity in wanted:
+            path = store.path_for(identity)
+            try:
+                stat = path.stat() if path else None
+            except OSError:
+                stat = None
+            if stat is None:
+                result[identity] = False
+                continue
+            key = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            row = cached.get(identity)
+            if row and (row["inode"], row["file_size"], row["mtime_ns"], row["ctime_ns"]) == key:
+                result[identity] = bool(row["valid"])
+                continue
+            result[identity] = store.verify(identity)
+            updates.append((identity, *key, int(result[identity])))
+        if updates:
+            self.connection.executemany(
+                "INSERT INTO evidence_checks(evidence_id,inode,file_size,mtime_ns,ctime_ns,valid) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(evidence_id) DO UPDATE SET inode=excluded.inode, file_size=excluded.file_size, "
+                "mtime_ns=excluded.mtime_ns, ctime_ns=excluded.ctime_ns, valid=excluded.valid",
+                updates,
+            )
+            self.connection.commit()
+        return result
 
     def label_rank_example(self, retrieval_id: str, note_id: str, label: float) -> None:
         self.connection.execute(
