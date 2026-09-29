@@ -25,6 +25,9 @@ recurrence_threshold = 2
 allow_untrusted = false
 allow_cross_repo = false
 require_instruction_authorization = true
+# CLI `remember --force` / elevated --authority or --taint / --authorize-instruction
+# (each needs --reason and is recorded in the ledger). Set false to require review.
+allow_privileged_remember = true
 
 [paths]
 inbox = "00-inbox"
@@ -52,6 +55,7 @@ class KBConfig:
     allow_untrusted: bool = False
     allow_cross_repo: bool = False
     require_instruction_authorization: bool = True
+    allow_privileged_remember: bool = True
     inbox_dir: str = "00-inbox"
     archive_dir: str = "99-archive"
     quarantine_dir: str = "98-quarantine"
@@ -121,9 +125,19 @@ class KBConfig:
             path.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> KBConfig:
+    def load(
+        cls, vault: str | Path | None = None, repo: str | Path | None = None, *, discover_repo: bool = True
+    ) -> KBConfig:
+        """Load a vault and the repository that scopes its memories.
+
+        The repository is ``repo``, else ``KB_REPO``, else the Git worktree containing the
+        current directory. It is never inferred from the vault's own location: a vault kept
+        in Git would otherwise give every project the vault's identity, and a vault outside
+        Git would give memories no identity at all. ``discover_repo=False`` means "no
+        repository context".
+        """
         vault_path = find_vault(vault)
-        repo_path = Path(repo).expanduser().resolve() if repo else find_repo(vault_path)
+        repo_path = resolve_repo(repo, discover=discover_repo)
         raw: dict[str, Any] = {}
         config_path = vault_path / "kb.toml"
         if config_path.exists():
@@ -152,6 +166,7 @@ class KBConfig:
             allow_untrusted=bool(security.get("allow_untrusted", False)),
             allow_cross_repo=bool(security.get("allow_cross_repo", False)),
             require_instruction_authorization=bool(security.get("require_instruction_authorization", True)),
+            allow_privileged_remember=bool(security.get("allow_privileged_remember", True)),
             inbox_dir=str(paths.get("inbox", "00-inbox")),
             archive_dir=str(paths.get("archive", "99-archive")),
             quarantine_dir=str(paths.get("quarantine", "98-quarantine")),
@@ -165,14 +180,22 @@ class KBConfig:
 
 
 def find_vault(value: str | Path | None = None) -> Path:
+    """Locate an existing vault; never fall back to an arbitrary working directory.
+
+    Falling back to the current directory made read-only commands create KB state
+    directories wherever they happened to run.
+    """
     explicit = value or os.environ.get("KB_VAULT")
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        path = Path(explicit).expanduser().resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"vault does not exist: {path}; create it with `kb init {explicit}`")
+        return path
     current = Path.cwd().resolve()
     for candidate in (current, *current.parents):
         if (candidate / "kb.toml").exists() or (candidate / ".obsidian").exists():
             return candidate
-    return current
+    raise FileNotFoundError("no vault found: pass --vault, set KB_VAULT, or run `kb init <path>`")
 
 
 def find_repo(start: Path) -> Path | None:
@@ -183,6 +206,35 @@ def find_repo(start: Path) -> Path | None:
     return None
 
 
+def resolve_repo(value: str | Path | None = None, *, discover: bool = True) -> Path | None:
+    explicit = value or os.environ.get("KB_REPO")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return find_repo(Path.cwd()) if discover else None
+
+
+LOCAL_STATE_IGNORES = (".kb/", ".kb-transactions/", ".kb-writer.lock")
+
+
+def missing_local_ignores(vault: Path) -> list[str]:
+    """Local-only state entries absent from the vault's .gitignore."""
+    path = vault / ".gitignore"
+    present = set(path.read_text(encoding="utf-8").split()) if path.is_file() else set()
+    return [entry for entry in LOCAL_STATE_IGNORES if entry not in present]
+
+
+def ensure_vault_gitignore(vault: Path) -> list[str]:
+    """Keep indexes, backups (which hold unredacted originals), and journals out of Git."""
+    missing = missing_local_ignores(vault)
+    if missing:
+        path = vault / ".gitignore"
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+        block = "# autonomic-obsidian-kb local state (derived, may hold unredacted backups)\n" + "\n".join(missing)
+        path.write_text(prefix + block + "\n", encoding="utf-8")
+    return missing
+
+
 def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:
     vault = Path(path).expanduser().resolve()
     vault.mkdir(parents=True, exist_ok=True)
@@ -191,4 +243,5 @@ def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:
         raise FileExistsError(f"{config_path} already exists; pass --force to replace it")
     config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
     (vault / ".obsidian").mkdir(exist_ok=True)
+    ensure_vault_gitignore(vault)
     return KBConfig.load(vault)

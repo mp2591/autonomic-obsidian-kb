@@ -7,6 +7,13 @@ from autonomic_kb.util import utc_now
 
 
 def make_vault(root: Path, repo: Path | None = None) -> KBConfig:
+    """Create a test vault bound to ``repo`` or to an empty non-Git directory.
+
+    Never let tests discover the repository containing the working directory.
+    """
+    if repo is None:
+        repo = root / "_default_repo"
+        repo.mkdir(parents=True, exist_ok=True)
     vault = root / "vault"
     vault.mkdir(parents=True, exist_ok=True)
     (vault / "kb.toml").write_text(

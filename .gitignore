@@ -35,3 +35,6 @@ test-artifacts/
 **/.kb-writer.lock
 **/.kb-transactions/
 # .kb-feedback.jsonl and .kb-outcomes.jsonl are durable; review before syncing.
+
+# Benchmark output; the committed baseline is benchmarks/results/reference.json.
+benchmarks/results/latest.json

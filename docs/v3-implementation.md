@@ -73,7 +73,7 @@ On first telemetry use, legacy `.kb/feedback.jsonl` and `.kb/outcomes.jsonl` are
 
 The strengthened evidence identity is intentionally not backward-compatible with content-only evidence IDs. Old evidence files remain on disk, but are not silently relabeled as provenance-verified. Re-capture/revalidate their sources and amend memory references explicitly. There is no automatic trust-upgrading conversion.
 
-Ordinary exceptions during KB-owned edits roll back semantic files and their operation records together. A process crash can leave a prepared journal in `.kb-transactions/`; subsequent reads and writes stop instead of guessing which later human edits to overwrite. Reconcile the saved before-state with current Markdown under owner control before resolving that journal. This is a deliberate fail-closed state, not a promise of automatic conflict resolution. The writer lock coordinates KB processes, not unrelated editors or distributed machines.
+Ordinary exceptions during KB-owned edits roll back semantic files and their operation records together. A process crash can leave a prepared journal in `.kb-transactions/`; subsequent reads and writes stop instead of guessing which later human edits to overwrite. `kb reconcile` lists each interrupted transaction with the status of every protected file; resolve it with `--accept-current` or `--restore-snapshot` (both require `--yes`, and files created after the crash are kept unless `--delete-new` is given). This is a deliberate fail-closed state, not a promise of automatic conflict resolution. The writer lock coordinates KB processes, not unrelated editors or distributed machines.
 
 ## Publication constraint
 
@@ -92,10 +92,14 @@ python -m compileall -q src scripts tests
 ruff check src scripts tests
 python -m unittest discover -s tests -v
 python -m pytest -q
-python benchmarks/run.py --output /tmp/kb-proxy.json
+python benchmarks/run.py   # regression gate against benchmarks/results/reference.json
 python -m pip wheel --no-deps --wheel-dir dist .
 ```
 
 CI repeats core checks on Python 3.11, 3.12, and 3.13. A separate offline-network container downloads and verifies the pinned official Obsidian AppImage during setup, starts the actual application with `--ozone-platform=headless`, and checks CLI, filesystem, metadata, graph, and rendering interoperability. No stub stands in for the application.
 
 Do not merge while any of these checks fail. GitHub-enforced branch protection is a separate repository setting; a workflow alone does not prevent an administrator from merging a failing PR. A release report must identify the tested commit/tree and actual CI conclusion. Local unit success alone is not real-Obsidian certification.
+
+## Changes after 0.3.0
+
+The September 2026 repository review found defects in repository scoping, secret scanning, transaction cost, duplicate identities, compaction, source invalidation, routing, and benchmark gating. The fixes, new reviewer commands, and measured effects are listed under "Unreleased" in the [changelog](../CHANGELOG.md), and each defect has a reproduction in `tests/test_review_regressions.py`.

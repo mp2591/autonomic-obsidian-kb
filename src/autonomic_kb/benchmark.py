@@ -50,8 +50,13 @@ class BenchmarkRunner:
             total_corpus_tokens = sum(max(1, int(note["token_cost"])) for note in corpus)
             for case in tasks:
                 budget = int(case.get("budget", self.config.default_budget))
+                # Uncommitted work in the checkout must not change a regression benchmark.
                 manifest = retriever.retrieve(
-                    str(case["task"]), budget=budget, paths=list(case.get("paths", [])), agent="benchmark"
+                    str(case["task"]),
+                    budget=budget,
+                    paths=list(case.get("paths", [])),
+                    agent="benchmark",
+                    use_worktree=False,
                 )
                 expected = list(case.get("expected_ids", []))
                 retrieved = [item.id for item in manifest.items]
@@ -137,3 +142,46 @@ class TraceBenchmarkRunner:
             "mean_read_delta": mean_known("read_delta"),
             "items": items,
         }
+
+
+def compare_to_reference(
+    result: dict[str, Any],
+    reference: dict[str, Any],
+    *,
+    precision_tolerance: float = 0.02,
+    token_tolerance: float = 0.05,
+) -> list[str]:
+    """Describe regressions against a committed reference; improvements never fail.
+
+    Small tolerances absorb BM25 tie ordering that can differ between SQLite builds.
+    """
+    problems: list[str] = []
+    current, expected = result.get("summary", {}), reference.get("summary", {})
+    if float(current.get("mean_expected_coverage", 0)) < float(expected.get("mean_expected_coverage", 0)) - 1e-9:
+        problems.append(
+            f"mean expected coverage fell from {expected['mean_expected_coverage']} "
+            f"to {current.get('mean_expected_coverage')}"
+        )
+    if float(current.get("mean_precision", 0)) < float(expected.get("mean_precision", 0)) - precision_tolerance:
+        problems.append(f"mean precision fell from {expected['mean_precision']} to {current.get('mean_precision')}")
+    if int(current.get("false_context", 0)) > int(expected.get("false_context", 0)):
+        problems.append(f"false_context rose from {expected['false_context']} to {current.get('false_context')}")
+    cases = {case.get("name"): case for case in result.get("cases", [])}
+    for baseline in reference.get("cases", []):
+        name = baseline.get("name")
+        case = cases.get(name)
+        if case is None:
+            problems.append(f"case {name!r} is missing from the results")
+            continue
+        if float(case.get("expected_coverage", 0)) < float(baseline.get("expected_coverage", 0)) - 1e-9:
+            problems.append(
+                f"case {name!r}: expected coverage fell from {baseline['expected_coverage']} "
+                f"to {case.get('expected_coverage')}"
+            )
+        allowed = float(baseline.get("injected_tokens", 0)) * (1 + token_tolerance)
+        if float(case.get("injected_tokens", 0)) > allowed:
+            problems.append(
+                f"case {name!r}: injected_tokens rose from {baseline['injected_tokens']} "
+                f"to {case.get('injected_tokens')}"
+            )
+    return problems

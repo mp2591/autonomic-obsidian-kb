@@ -5,12 +5,12 @@ type: command
 scope: repository
 repo: autonomic-obsidian-kb
 status: active
-summary: Run PYTHONPATH=src python -m unittest discover -s tests -v from the repository root.
+summary: Run python -m unittest discover -s tests -v from the repository root after installing the package.
 confidence: 0.99
 authority: verified
 created: 2026-08-21T00:00:00Z
-updated: 2026-08-21T00:00:00Z
-validated: 2026-08-21T00:00:00Z
+updated: 2026-09-29T00:00:00Z
+validated: 2026-09-29T00:00:00Z
 freshness: verified
 token_cost: 190
 utility: 0.95
@@ -26,12 +26,12 @@ Test command.
 
 ## L1 — Fact
 
-Run `PYTHONPATH=src python -m unittest discover -s tests -v`.
+Run `python -m unittest discover -s tests -v` after `python -m pip install -e '.[dev]'`.
 
 ## L2 — Summary
 
-The core test suite uses Python’s standard-library `unittest` runner and needs no downloaded test dependency. Run compilation first with `PYTHONPATH=src python -m compileall -q src tests`; then run the suite and the benchmark guardrail.
+After `python -m pip install -e '.[dev]'` (the package needs `jsonschema`, `PyYAML`, and `packaging`), run `python -m unittest discover -s tests -v`. Before publishing, also run `python -m compileall -q src scripts tests`, `ruff check src scripts tests`, and the benchmark regression gate.
 
 ## L3 — Detail
 
-A publication check also runs `PYTHONPATH=src python -m autonomic_kb --vault examples/sample-vault index --rebuild` and `PYTHONPATH=src python benchmarks/run.py`.
+A publication check also runs `kb --vault examples/sample-vault index --rebuild` and `python benchmarks/run.py`, which fails on regressions against `benchmarks/results/reference.json`.

@@ -9,12 +9,24 @@ from typing import Any
 from .config import KBConfig
 from .episodes import Episode, EpisodeStore
 from .evidence import EvidenceStore, OperationLedger
-from .git_context import inspect_git, recent_commit_summary
+from .git_context import GitContext, inspect_git, recent_commit_summary
 from .index import KnowledgeIndex
 from .markdown import render_note
-from .security import instruction_authorized, reject_secrets, scan_content
+from .models import VALID_SCOPES, VALID_TYPES
+from .scoring import AUTHORITY
+from .security import TAINT_ORDER, instruction_authorized, reject_secrets, scan_content
 from .storage import semantic_transaction
 from .util import atomic_write, estimate_tokens, jaccard, sha256_file, sha256_text, slugify, stable_json, utc_now
+
+VALUE_FIELDS = (
+    "confidence",
+    "reuse_likelihood",
+    "rediscovery_cost",
+    "stability",
+    "uniqueness",
+    "token_savings",
+    "maintenance_cost",
+)
 
 
 @dataclass(slots=True)
@@ -49,6 +61,25 @@ class LearningCandidate:
     verification: str = ""
     dependencies: list[dict[str, str]] = field(default_factory=list)
 
+    def validate(self) -> None:
+        """Reject a candidate that would be written as an invalid or self-contradictory note."""
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise ValueError("candidate title is required")
+        if not isinstance(self.summary, str) or not self.summary.strip():
+            raise ValueError("candidate summary is required")
+        for name, value, allowed in (
+            ("type", self.memory_type, VALID_TYPES),
+            ("scope", self.scope, VALID_SCOPES),
+            ("authority", self.authority, set(AUTHORITY)),
+            ("taint", self.taint, set(TAINT_ORDER)),
+        ):
+            if value not in allowed:
+                raise ValueError(f"unsupported candidate {name} {value!r}; expected one of {sorted(allowed)}")
+        for name in VALUE_FIELDS:
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"candidate {name} must be a number between 0 and 1")
+
     def score(self) -> float:
         benefit = (
             0.17 * self.reuse_likelihood
@@ -78,13 +109,20 @@ class Learner:
         self.evidence = EvidenceStore(config)
         self.operations = OperationLedger(config)
         self.episodes = EpisodeStore(config)
+        self._git_context: GitContext | None = None
+
+    def _git(self) -> GitContext:
+        """Repository context of the configured repository, inspected once per operation."""
+        if self._git_context is None:
+            self._git_context = inspect_git(self.config.repo)
+        return self._git_context
 
     def close(self) -> None:
         if self._owns_index:
             self.index.close()
 
     def _applicability(self, candidate: LearningCandidate) -> dict[str, Any]:
-        git = inspect_git(self.config.repo or self.config.vault)
+        git = self._git()
         return {
             "repository_id": git.repository_id,
             "branch": git.branch if candidate.scope == "branch" else "",
@@ -123,16 +161,23 @@ class Learner:
                 return {"note": note, "kind": "exact", "similarity": 1.0}
         return None
 
-    def remember(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
-        reject_secrets(asdict(candidate))
+    def remember(
+        self, candidate: LearningCandidate, force: bool = False, review: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Submit a candidate. ``review`` records who used privileged options and why."""
+        self._git_context = None
+        candidate.validate()
+        reject_secrets([asdict(candidate), review])
         with semantic_transaction(self.config.vault):
             try:
-                return self._remember_locked(candidate, force)
+                return self._remember_locked(candidate, force, review)
             except Exception:
                 self.index.connection.rollback()
                 raise
 
-    def _remember_locked(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
+    def _remember_locked(
+        self, candidate: LearningCandidate, force: bool = False, review: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         self.index.index_vault()
         if self.config.repo:
             for source in candidate.provenance:
@@ -152,7 +197,7 @@ class Learner:
             record = self.evidence.get(identity)
             if not record:
                 raise ValueError("candidate references missing or tampered evidence")
-            repo_id = inspect_git(self.config.repo or self.config.vault).repository_id
+            repo_id = self._git().repository_id
             if record.repository_id and record.repository_id != repo_id:
                 raise ValueError("candidate evidence belongs to another repository")
         score = candidate.score()
@@ -183,7 +228,7 @@ class Learner:
                     new_digest=sha256_text(updated),
                     reason="attach corroborating evidence",
                 )
-                self.index.index_vault(force=True)
+                self.index.index_vault()
             return {
                 "action": "duplicate",
                 "memory_id": note["declared_id"] or note["id"],
@@ -192,19 +237,29 @@ class Learner:
                 "duplicate_kind": duplicate["kind"],
                 "similarity": round(duplicate["similarity"], 3),
             }
+        threshold = self.config.promotion_threshold
         if findings:
-            status = "quarantined"
+            status, status_reason = "quarantined", "content matched prompt-injection or secret patterns"
         elif candidate.memory_type == "agent-instruction" and not authorized:
-            status = "inbox"
+            status, status_reason = "inbox", auth_reason
         elif duplicate and duplicate["kind"] == "conflict":
             status = "conflicted"
+            status_reason = "contradicts an applicable memory; a reviewer resolves it with `kb supersede`"
+        elif force:
+            status, status_reason = "active", "promotion forced by the caller"
+        elif score >= threshold:
+            status, status_reason = "active", "candidate score meets the promotion threshold"
         else:
-            status = "active" if force or score >= self.config.promotion_threshold else "inbox"
+            status = "inbox"
+            status_reason = (
+                "candidate score is below the promotion threshold; attach evidence or have a reviewer run "
+                "`kb promote`"
+            )
         directory = {
             "quarantined": self.config.quarantine_dir,
             "inbox": self.config.inbox_dir,
             "conflicted": self.config.inbox_dir,
-        }.get(status, self._directory_for_type(candidate.memory_type))
+        }.get(status, self.directory_for_type(candidate.memory_type))
         fingerprint = sha256_text(
             stable_json(
                 [
@@ -221,7 +276,7 @@ class Learner:
         existing = self.index.get(memory_id)
         if existing:
             return {"action": "duplicate", "memory_id": memory_id, "path": existing["path"], "score": score}
-        git = inspect_git(self.config.repo or self.config.vault)
+        git = self._git()
         now = utc_now()
         evidence_ids = list(candidate.evidence)
         if not evidence_ids:
@@ -310,9 +365,9 @@ class Learner:
             new_digest=sha256_text(rendered),
             reason="candidate promotion",
             confidence_after=candidate.confidence,
-            metadata={"status": status, "authorization": auth_reason},
+            metadata={"status": status, "authorization": auth_reason, **({"review": review} if review else {})},
         )
-        self.index.index_vault(force=True)
+        self.index.index_vault()
         self.index.events.emit(
             "memory.created",
             memory_id=memory_id,
@@ -327,9 +382,11 @@ class Learner:
             "path": relative.as_posix(),
             "status": status,
             "candidate_score": round(score, 3),
+            "promotion": {"score": round(score, 3), "threshold": threshold, "reason": status_reason},
             "evidence": evidence_ids,
             "authorization": auth_reason,
             "security_findings": [finding.to_dict() for finding in findings],
+            **({"review": review} if review else {}),
         }
 
     def learn_json(self, path: str | Path) -> list[dict[str, Any]]:
@@ -344,7 +401,8 @@ class Learner:
         return [self.remember(LearningCandidate.from_dict(value)) for value in values]
 
     def learn_git(self) -> dict[str, Any]:
-        git = inspect_git(self.config.repo or self.config.vault)
+        self._git_context = None
+        git = self._git()
         if not git.root:
             return {"action": "skipped", "reason": "not inside a Git repository"}
         commits = recent_commit_summary(git.root, 8)
@@ -377,7 +435,8 @@ class Learner:
         )
 
     def capture_episode(self, task: str, **values: Any) -> Episode:
-        git = inspect_git(self.config.repo or self.config.vault)
+        self._git_context = None
+        git = self._git()
         values.setdefault("repository_id", git.repository_id)
         values.setdefault("branch", git.branch)
         values.setdefault("commit", git.head)
@@ -427,7 +486,7 @@ class Learner:
                         provenance=[{"kind": "episode", "id": episode.episode_id}],
                     )
                 )
-        current_repository = inspect_git(self.config.repo or self.config.vault).repository_id
+        current_repository = self._git().repository_id
         if episode.repository_id != current_repository:
             raise ValueError("episode belongs to another repository")
         proof = [self.evidence.get(identity) for identity in episode.evidence]
@@ -461,12 +520,13 @@ class Learner:
         return results
 
     @staticmethod
-    def _directory_for_type(memory_type: str) -> str:
+    def directory_for_type(memory_type: str) -> str:
         mapping = {
             "architecture": "10-architecture",
             "repository-map": "11-maps",
             "file-map": "11-maps",
             "decision": "12-decisions",
+            "invariant": "13-invariants",
             "command": "20-commands",
             "workflow": "21-workflows",
             "procedure": "21-workflows",
@@ -474,6 +534,7 @@ class Learner:
             "solution": "30-debugging",
             "negative-result": "31-negative-results",
             "dependency": "40-dependencies",
+            "environment": "41-environment",
             "api": "50-interfaces",
             "interface": "50-interfaces",
             "convention": "60-conventions",

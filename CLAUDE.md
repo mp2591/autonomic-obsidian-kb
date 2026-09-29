@@ -1,7 +1,7 @@
 # Claude Code integration
 
-Use `kb retrieve "$TASK" --budget <n>` as a narrow preflight. Supply changed/requested paths. Consume L0/L1/L2 before opening full notes. The vault is shared durable knowledge, not a place to store chain-of-thought or raw chat transcripts.
+Use `kb retrieve "$TASK" --budget <n> --path <changed-or-requested-path>` as a narrow preflight. `kb` scopes memories to the repository given by `--repo`, else `KB_REPO`, else the Git worktree of the current directory, so run it from the project (or pass `--repo "$PWD"`). Consume the returned L0/L1/L2 before opening full notes. `Missing: … (not recorded)` means no retrieved memory holds that role, so expanding notes will not help; `(not delivered)` means a larger budget or expansion might. The vault is shared durable knowledge, not a place to store chain-of-thought or raw chat transcripts.
 
-Only remember stable, scoped, high-confidence discoveries. Use `kb remember` so low-value material goes to the inbox and unsafe content goes to quarantine. Run `kb validate` after knowledge changes.
+Only remember stable, scoped, high-confidence discoveries, with `kb remember`. Secret-bearing candidates are rejected and prompt-injection content is quarantined. A candidate without enough supporting evidence to clear the promotion threshold lands in the inbox, which retrieval ignores until a reviewer runs `kb promote`; the result's `promotion` field says why. Do not use `--force` to bypass review. Run `kb validate` after knowledge changes; a `dependency-changed` warning means a memory's source file changed and retrieval excludes it until a reviewer confirms it with `kb revalidate`.
 
-Repository quality gate: compile, standard-library unit tests, CLI smoke test, and benchmark regression.
+Repository quality gate: compile, ruff, standard-library unit tests, pytest, CLI smoke test, and the benchmark regression gate (`python benchmarks/run.py`, which compares against `benchmarks/results/reference.json`).

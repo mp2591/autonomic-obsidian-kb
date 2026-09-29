@@ -10,9 +10,11 @@ from .models import TaskContext
 from .util import is_time_active, parse_time, sha256_file
 
 
-def source_dependencies(metadata: dict[str, Any]) -> list[dict[str, str]]:
+def source_dependencies(
+    metadata: dict[str, Any], keys: tuple[str, ...] = ("dependencies", "provenance", "validators")
+) -> list[dict[str, str]]:
     dependencies = []
-    for key in ("dependencies", "provenance", "validators"):
+    for key in keys:
         values = metadata.get(key, [])
         if not isinstance(values, list):
             continue
