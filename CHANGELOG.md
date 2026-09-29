@@ -2,7 +2,16 @@
 
 ## Unreleased
 
-Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`.
+Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`; defects from the follow-up review are reproduced in `tests/test_second_review.py`.
+
+### Follow-up review
+
+- `[security] allow_privileged_remember = false` now means no self-vouching on any path. Before, it refused only the CLI privileged options, while `kb learn --file` with self-assigned value estimates, consolidation of an episode backed by self-asserted `evaluation` evidence, and a `remember` padded with self-created evidence still produced active memories. With the switch off, every candidate waits in the inbox for `kb promote`, and library `force` no longer bypasses it. The earlier claim that the switch required review "for everything" was not true until this change. Review is mandatory and auditable, not authenticated: reviewer commands are ordinary CLI commands, so restrict agents to MCP to control who reviews.
+- Archiving, quarantine, and reviewer moves never overwrite an existing file. A taken name gets a suffix from a hash of the full memory identity, and moves use link-then-unlink. Before, the suffix came from the first characters of the identity or path, which most notes share, so a third note with the same file name silently replaced the second.
+- Retrieval no longer walks and hashes the whole repository to add code symbols. The code graph parses only the active paths and caches each file by its stat identity; the whole-repository projection prunes ignored directories and re-parses only changed files. In a 6,700-file repository the first retrieval after an edit fell from 48–51 s to 0.3 s. (The earlier performance figures used a vault with no code repository and did not cover this.)
+- Runtime logs rotate at 5 MB and `kb stats` reads only their tail; the embedding cache drops vectors for notes that no longer exist and is written atomically; heal backups, which keep unredacted originals, expire after 30 days. Files set aside under `.kb/rolled-back/` are kept, because one may be the only copy of a note saved during a failed transaction.
+- Mermaid graph output is deterministic, and exact-path search treats `%` and `_` literally.
+- Design docs no longer describe allowlisted command validators, learned ranking, or feedback/outcomes under `.kb/` as current behavior; `docs/schema.md` states the repository-identity requirement and gives a `validity` example that passes schema validation.
 
 ### Breaking
 
@@ -11,6 +20,10 @@ Fixes from the September 2026 repository review. Each defect has a reproduction 
 - Without `--repo` or `KB_REPO`, the scoping repository is the Git worktree of the current directory rather than the one containing the vault. Pass `--repo` explicitly where the working directory is not the project (hooks, schedulers, MCP launchers).
 - `kb init` creates its starter note with `global` scope and the identity `kb:global:repository-map:knowledge-base`.
 - `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` now require `--reason`; scripts using them must add one.
+- `kb lease acquire` and MCP `kb_lease_acquire` refuse the default `generic` agent identity; pass `--agent` or set `KB_AGENT` (the 0.3.0 README example omitted it). A lease taken under `generic` before upgrading can still be released without `--agent`.
+- `kb learn --file` ignores caller-supplied value estimates (`reuse_likelihood`, `rediscovery_cost`, `stability`, `uniqueness`, `token_savings`, `maintenance_cost`), and its `validators` no longer raise the promotion score, so imported candidates score like MCP candidates. Imported validators are still written to the note and checked by `kb validate`.
+- With `[security] allow_privileged_remember = false`, no candidate from any path is promoted automatically; every one waits in the inbox for `kb promote`. Memories that activated through those routes before upgrading stay active.
+- The first write after upgrading removes heal backup sets under `.kb/backups/` older than 30 days. Copy out any you want to keep before upgrading.
 - The index gains derived columns and a parser-format bump, so the first command after upgrading re-reads every note and re-verifies evidence once.
 
 ### Security and scoping
@@ -56,6 +69,9 @@ Measured on a synthetic 2,000-note vault against 0.3.0:
 | Retrieval, in process, warm | 1.14 s | 0.18 s |
 | First retrieval, including index build | 4.96 s | 3.62 s |
 | MCP `kb://memories` | 2.50 s | 0.15 s |
+| `kb retrieve` inside a 6,700-file repository, first call after editing a file | 48–51 s | 0.3 s |
+
+The first four rows use a synthetic vault with no code repository; the last row adds the code-graph cost that retrieval pays inside a real project.
 
 Writes reindex incrementally instead of reparsing the vault; a replaced file is detected by inode. Content-safety verdicts are stored at index time. Evidence checks are cached on file identity including ctime, so warm figures assume an unchanged evidence store. MCP catalog reads verify evidence in one batch. The YAML parser uses libyaml when available.
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import KBConfig
 from .index import KnowledgeIndex
-from .util import sha256_text
+from .util import atomic_write, sha256_text
 
 
 class LocalEmbeddingBackend:
@@ -69,7 +69,13 @@ class LocalEmbeddingBackend:
             vectors = model.encode(texts, normalize_embeddings=True).tolist()
             for (key, _), vector in zip(missing, vectors, strict=True):
                 cache[key] = vector
-            self.cache_path.write_text(json.dumps(cache, separators=(",", ":")), encoding="utf-8")
+        # Keep only vectors for current note revisions so the cache stays bounded, including
+        # when notes were deleted and nothing new needed encoding.
+        current = {f"{row[0]}:{row[1]}" for row in index.connection.execute("SELECT id,source_hash FROM notes")}
+        pruned = {key: vector for key, vector in cache.items() if key in current}
+        if texts or len(pruned) != len(cache):
+            atomic_write(self.cache_path, json.dumps(pruned, separators=(",", ":")))
+        cache = pruned
         query_vector = model.encode([query], normalize_embeddings=True)[0].tolist()
         scored = []
         for note in notes:

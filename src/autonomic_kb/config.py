@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Agent identity when neither --agent nor KB_AGENT is given; every such caller shares it.
+DEFAULT_AGENT = "generic"
+
 DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration
 
 [retrieval]
@@ -25,8 +28,12 @@ recurrence_threshold = 2
 allow_untrusted = false
 allow_cross_repo = false
 require_instruction_authorization = true
-# CLI `remember --force` / elevated --authority or --taint / --authorize-instruction
-# (each needs --reason and is recorded in the ledger). Set false to require review.
+# true: CLI `remember --force`, elevated --authority/--taint and --authorize-instruction
+# are allowed with --reason (recorded in the ledger), and candidates whose score clears
+# promotion_threshold activate automatically. false: no self-vouching of any kind; every
+# candidate (remember, learn, consolidate, MCP) waits in the inbox for `kb promote`.
+# Review is then mandatory and auditable, not authenticated: reviewer commands are ordinary
+# CLI commands, so restrict agents to MCP to control who reviews.
 allow_privileged_remember = true
 
 [paths]

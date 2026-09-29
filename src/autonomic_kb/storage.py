@@ -18,13 +18,14 @@ import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .util import atomic_write, stable_json
+from .util import atomic_write, sha256_text, stable_json
 
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCAL = threading.local()
@@ -71,6 +72,11 @@ def vault_lock(vault: Path):
 
 
 EXCLUDED_DIRECTORIES = {"__pycache__", "node_modules"}
+# Heal backups keep unredacted originals; they are local recovery copies, not an archive,
+# so they expire. Files under .kb/rolled-back/ are never pruned: one may be the only copy
+# of a note someone saved while a transaction failed.
+LOCAL_COPY_DIRECTORIES = (".kb/backups",)
+LOCAL_COPY_RETENTION_DAYS = 30
 LEDGER_DIRECTORY = ".kb-memory-events"
 JOURNAL_DIRECTORY = ".kb-transactions"
 
@@ -123,6 +129,47 @@ def semantic_files(vault: Path) -> dict[str, str]:
     return {
         path.relative_to(vault).as_posix(): path.read_text(encoding="utf-8") for path in semantic_paths(vault)
     }
+
+
+def move_into(source: Path, directory: Path, identity: str) -> Path:
+    """Move ``source`` into ``directory`` without ever replacing an existing file.
+
+    A taken name gets a suffix from a hash of the note's full identity (not a prefix of it,
+    which most memory IDs share). Hard link then unlink makes the move no-clobber on
+    filesystems that support links.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    if source.parent.resolve() == directory.resolve():
+        return source
+    digest = sha256_text(identity)
+    names = [source.name]
+    names += [f"{source.stem}-{digest[:length]}{source.suffix}" for length in (8, 16, 64)]
+    names += [f"{source.stem}-{digest[:16]}-{number}{source.suffix}" for number in range(2, 1000)]
+    for name in names:
+        destination = directory / name
+        try:
+            os.link(source, destination)
+        except FileExistsError:
+            continue
+        except OSError:
+            # No hard links here: copy into an exclusively created file instead of renaming,
+            # because rename would replace a file an external editor created meanwhile.
+            try:
+                _copy_exclusive(source, destination)
+            except FileExistsError:
+                continue
+        source.unlink()
+        return destination
+    raise FileExistsError(f"no free file name for {source.name} in {directory}")
+
+
+def _copy_exclusive(source: Path, destination: Path) -> None:
+    """Copy to ``destination`` only if it does not exist (O_EXCL); never replaces a file."""
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        shutil.copyfileobj(reader, writer)
+        writer.flush()
+        os.fsync(writer.fileno())
+    shutil.copystat(source, destination)
 
 
 def _link_or_copy(source: Path, destination: Path) -> None:
@@ -342,6 +389,25 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
         }
 
 
+def prune_local_copies(vault: Path, retention_days: int = LOCAL_COPY_RETENTION_DAYS) -> list[str]:
+    """Remove heal backup sets older than ``retention_days``; return what was removed."""
+    cutoff = time.time() - retention_days * 86400
+    removed = []
+    for relative in LOCAL_COPY_DIRECTORIES:
+        root = vault / relative
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for entry in root.iterdir():
+            try:
+                expired = entry.is_dir() and not entry.is_symlink() and entry.stat().st_mtime < cutoff
+            except OSError:
+                continue
+            if expired:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed.append(f"{relative}/{entry.name}")
+    return removed
+
+
 def _discard_finished_journals(directory: Path) -> None:
     # Earlier releases kept one committed/rolled-back journal per write indefinitely.
     for path in directory.glob("*.json"):
@@ -362,6 +428,7 @@ def semantic_transaction(vault: Path):
             raise ValueError("transaction journal path escaped vault")
         directory.mkdir(parents=True, exist_ok=True)
         _discard_finished_journals(directory)
+        prune_local_copies(vault)
         identity = uuid.uuid4().hex
         journal = directory / f"{identity}.json"
         snapshot = directory / identity

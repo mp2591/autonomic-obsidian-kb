@@ -20,16 +20,17 @@ Types specialize lifecycle/validation behavior (`command`, `workflow`, `known-fa
 
 ## Scope and identity
 
-`global -> user -> repository -> project -> module -> branch -> task -> session` is an applicability lattice, not simple inheritance. Repository-scoped knowledge may carry a canonical `repository_id`; narrow scopes require their active context.
+`global -> user -> repository -> project -> module -> branch -> task -> session` is an applicability lattice, not simple inheritance. Repository-, project-, module- and branch-scoped knowledge must carry a canonical `repository_id` (or a legacy `repo` name) to be retrieved wherever a repository is active; `kb validate` reports `missing-repository-identity` otherwise. Narrow scopes also require their active context.
 
 ## Temporal validity
 
 ```yaml
 validity:
-  valid_from: 2026-08-01T00:00:00Z
-  valid_to: null
+  valid_from: "2026-08-01T00:00:00Z"
+  valid_to: ""            # empty string means open-ended; YAML null fails schema validation
   as_of_commit: abc123
   version_range: ">=1.2,<2"
+version_package: example-package   # required with version_range; retrieval needs --version example-package=<v>
 ```
 
 Valid time is separate from when the KB first recorded or last validated the memory. Disjoint temporal versions are not automatically treated as contradictions.

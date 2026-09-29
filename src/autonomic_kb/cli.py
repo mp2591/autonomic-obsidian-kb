@@ -13,7 +13,7 @@ from typing import Any
 
 from . import __version__
 from .benchmark import BenchmarkRunner, TraceBenchmarkRunner, compare_to_reference
-from .config import KBConfig, initialize_vault, missing_local_ignores
+from .config import DEFAULT_AGENT, KBConfig, initialize_vault, missing_local_ignores
 from .dashboard import dashboard_data
 from .evidence import EvidenceStore
 from .git_context import inspect_git
@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--vault", help="Obsidian vault root (or KB_VAULT)")
     parser.add_argument("--repo", help="Repository whose state validates and scopes memories")
-    parser.add_argument("--agent", default=os.environ.get("KB_AGENT", "generic"), help="agent/tool identity")
+    parser.add_argument("--agent", default=os.environ.get("KB_AGENT", DEFAULT_AGENT), help="agent/tool identity")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     commands = parser.add_subparsers(dest="command", required=True)
 
