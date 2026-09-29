@@ -1,5 +1,7 @@
 # State-of-the-art v2 implementation map
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 This document maps the 2026 architecture review to implemented controls.
 
 | Review weakness | V2 implementation |
@@ -23,7 +25,7 @@ This document maps the 2026 architecture review to implemented controls.
 | Repository basename identity | Canonical remote-derived `repository_id`; Git ancestry metadata |
 | Flat note graph | Canonical `target_id`, reverse edges, PPR utility and code graph projection |
 | No code intelligence | Python AST symbols/imports + generic repository file graph cache |
-| Mechanical validation only | Evidence digest, JSON Schema, source/file and allowlisted command validators |
+| Mechanical validation only | Evidence digest, JSON Schema, source/file validators with note-defined execution disabled |
 | Self-heal without postcondition | Backup, post-validation and automatic rollback on error regression |
 | Simplistic forgetting | Evidence-preserving archive + near-duplicate and expected-value criteria |
 | Regex-only memory security | Taint propagation, privileged-instruction authorization, entropy secret detection, hard gates |

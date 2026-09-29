@@ -4,6 +4,7 @@ import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from .util import sha256_text
 
@@ -43,6 +44,11 @@ def canonical_remote(value: str) -> str:
     if value.startswith("git@") and ":" in value:
         host, path = value.split(":", 1)
         value = f"https://{host.split('@', 1)[1]}/{path}"
+    parsed = urlsplit(value)
+    if parsed.scheme and parsed.netloc:
+        # Credentials and transient query arguments are never repository identity.
+        netloc = parsed.netloc.rsplit("@", 1)[-1].lower()
+        value = urlunsplit((parsed.scheme.lower(), netloc, parsed.path, "", ""))
     return value.rstrip("/").lower()
 
 

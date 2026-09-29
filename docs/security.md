@@ -1,20 +1,13 @@
-# Security model v2
+# Local memory security boundary
 
-Persistent memory is a capability boundary. Similarity never grants authority.
+V3 is designed for a trusted local, single-user host and controlled stdio clients, not a multi-tenant remote service.
 
-## Independent controls
+Hard read gates cover schema, scope, authorization of privileged instruction records, hostile taint, statuses, temporal/source applicability, evidence integrity, duplicate identities, and conflicting applicable claims. Candidate limits are applied after eligibility. MCP resource, evidence, catalog, and inspection reads use the same policy. Extra MCP candidate fields cannot self-assign authority. An uncertainty option cannot override privileged-instruction authorization or hostile-taint blocks.
 
-- scope and canonical repository identity before ranking;
-- valid-time and commit-lineage applicability;
-- authority separate from confidence;
-- provenance taint propagated through derived memory;
-- explicit authorization for privileged `agent-instruction` memories;
-- secret and prompt-injection scanning;
-- content-addressed evidence verification;
-- repository-contained, allowlisted, argv-only executable validators;
-- quarantine/conflict/retraction hard gates;
-- backup, operation ledger and rollback-safe healing.
+Secret scanning happens before durable candidate, episode, evidence, feedback, outcome, and operation writes. It includes metadata, not only visible body text. Scanners have finite coverage; review sensitive content before syncing. KB state paths and source validators must stay inside their declared roots, and external state symlinks are rejected.
 
-Ordinary repository text, issues, agent observations or external content cannot create trusted executable instructions merely by being summarized. A model classifier may be added as defense in depth, but it must not be the authorization mechanism.
+**Note-defined command execution is removed.** Validation is not an execution interface. Replay requires explicit operator opt-in, trusted argv, separate snapshots, and an evaluator; it is not an OS sandbox. Host tool permissions must be enforced outside memory. Agent context and receipts explicitly return `authorizes_action: false`.
 
-Adversarial regression tests cover injection persistence, hostile taint, cross-repository canaries, forged evidence, validator path escape/shell syntax and memory flooding. See `adversarial-testing.md`.
+Hashes bind evidence fields and detect inconsistent identities; they do not authenticate producers or establish factual truth. Authority metadata and evaluation-kind evidence are trusted-host assertions, not signed grants. Cooperating KB writers use a single-writer lock and rollback journals, while external editor conflicts require reconciliation. Prepared journals block reads and writes after an interrupted transaction.
+
+See [the complete implementation and limitations](v3-implementation.md), especially migration of legacy content-only evidence IDs. Do not silently upgrade old evidence to authenticated provenance.

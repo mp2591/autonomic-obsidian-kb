@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import fnmatch
 import json
-import shlex
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,7 +50,6 @@ class ValidatorRegistry:
     def __init__(self, config: KBConfig):
         self.config = config
         self.handlers: dict[str, Callable[[dict[str, Any], dict[str, Any], str], list[ValidationIssue]]] = {
-            "command": self._command,
             "file-exists": self._file_exists,
             "source-hash": self._source_hash,
         }
@@ -68,6 +65,18 @@ class ValidatorRegistry:
             if not isinstance(spec, dict):
                 continue
             kind = str(spec.get("kind", ""))
+            if kind == "command":
+                result.append(
+                    ValidationIssue(
+                        "error",
+                        "validator-execution-disabled",
+                        relative,
+                        "Memory cannot authorize command execution; use an explicit host evaluator.",
+                        str(metadata.get("id", "")),
+                        False,
+                    )
+                )
+                continue
             handler = self.handlers.get(kind)
             if handler:
                 result.extend(handler(metadata, spec, relative))
@@ -165,99 +174,6 @@ class ValidatorRegistry:
             ]
         return []
 
-    def _command(self, metadata: dict[str, Any], spec: dict[str, Any], relative: str) -> list[ValidationIssue]:
-        memory_id = str(metadata.get("id", ""))
-        if not self.config.repo:
-            return [
-                ValidationIssue(
-                    "info", "validator-skipped", relative, "Command validator requires --repo", memory_id, False, spec
-                )
-            ]
-        command = spec.get("argv") or spec.get("command")
-        if isinstance(command, str):
-            argv = shlex.split(command)
-        elif isinstance(command, list):
-            argv = [str(value) for value in command]
-        else:
-            return [
-                ValidationIssue(
-                    "error", "invalid-validator", relative, "command validator requires argv", memory_id, False, spec
-                )
-            ]
-        if not argv:
-            return []
-        allowed = self.config.extra.get("validation", {}).get("allowed_executables", ["python", "python3", "git"])
-        if Path(argv[0]).name not in {Path(str(value)).name for value in allowed}:
-            return [
-                ValidationIssue(
-                    "error",
-                    "validator-not-allowlisted",
-                    relative,
-                    f"Executable {argv[0]!r} is not allowlisted",
-                    memory_id,
-                    False,
-                    spec,
-                )
-            ]
-        forbidden = {";", "&&", "||", "|", ">", "<", "`", "$()"}
-        if any(any(token in arg for token in forbidden) for arg in argv):
-            return [
-                ValidationIssue(
-                    "error",
-                    "validator-shell-syntax",
-                    relative,
-                    "Shell syntax is not allowed in executable validators",
-                    memory_id,
-                    False,
-                    spec,
-                )
-            ]
-        timeout = min(30.0, max(0.5, float(spec.get("timeout", 10.0))))
-        try:
-            result = subprocess.run(
-                argv, cwd=self.config.repo, text=True, capture_output=True, timeout=timeout, check=False
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            return [
-                ValidationIssue(
-                    "warning",
-                    "validator-exec-failed",
-                    relative,
-                    f"Validator execution failed: {error}",
-                    memory_id,
-                    True,
-                    spec,
-                )
-            ]
-        expected = int(spec.get("expected_exit", 0))
-        if result.returncode != expected:
-            detail = (result.stderr or result.stdout or "")[-300:]
-            return [
-                ValidationIssue(
-                    "warning",
-                    "validator-command-failed",
-                    relative,
-                    f"Validator exited {result.returncode}, expected {expected}: {detail}",
-                    memory_id,
-                    True,
-                    spec,
-                )
-            ]
-        contains = str(spec.get("stdout_contains", ""))
-        if contains and contains not in result.stdout:
-            return [
-                ValidationIssue(
-                    "warning",
-                    "validator-output-mismatch",
-                    relative,
-                    f"Validator output did not contain {contains!r}",
-                    memory_id,
-                    True,
-                    spec,
-                )
-            ]
-        return []
-
 
 class Validator:
     def __init__(self, config: KBConfig, index: KnowledgeIndex | None = None):
@@ -273,17 +189,9 @@ class Validator:
             self.index.close()
 
     def _load_schema(self) -> dict[str, Any]:
-        candidates = [
-            Path(__file__).resolve().parents[2] / "schema" / "memory.schema.json",
-            self.config.vault / "schema" / "memory.schema.json",
-        ]
-        for path in candidates:
-            if path.exists():
-                try:
-                    return json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    continue
-        return {}
+        from importlib.resources import files
+
+        return json.loads(files("autonomic_kb").joinpath("data/memory.schema.json").read_text(encoding="utf-8"))
 
     def validate(self) -> ValidationReport:
         self.index.index_vault(force=True)
@@ -341,7 +249,12 @@ class Validator:
             issues.extend(self._invalidation_issues(path, metadata))
             claim_key = str(metadata.get("claim_key", ""))
             if claim_key and metadata.get("status", "active") == "active":
-                claims.setdefault(claim_key, []).append((metadata.get("claim_value"), relative, metadata))
+                claims.setdefault(
+                    json.dumps(
+                        [claim_key, metadata.get("repository_id"), metadata.get("branch"), metadata.get("scope")]
+                    ),
+                    [],
+                ).append((metadata.get("claim_value"), relative, metadata))
         for claim_key, values in claims.items():
             distinct = {json.dumps(value, sort_keys=True, default=str) for value, _, _ in values}
             if len(distinct) <= 1:
@@ -388,9 +301,10 @@ class Validator:
             "dependency": 0.7,
             "fact": 0.45,
         }
+        usage = dict(self.index.connection.execute("SELECT note_id,COUNT(*) FROM usage GROUP BY note_id"))
         for note in self.index.all_notes({"active", "stale"}):
             days = age_days(str(note.get("validated") or note.get("updated") or ""))
-            uses = int(note.get("uses", 0) or 0)
+            uses = int(usage.get(note["id"], 0))
             stale_prob = min(1.0, days / max(1.0, self.config.stale_after_days))
             reuse = min(1.0, 0.15 + uses * 0.12)
             harm = risk_weight.get(str(note.get("type")), 0.5)
@@ -423,6 +337,8 @@ class Validator:
             relative = path.relative_to(self.config.vault)
             if any(part in ignored for part in relative.parts):
                 continue
+            if path.is_symlink() or not path.resolve().is_relative_to(self.config.vault.resolve()):
+                continue
             yield path
 
     def _schema_issues(self, path: str, metadata: dict[str, Any]) -> list[ValidationIssue]:
@@ -430,7 +346,7 @@ class Validator:
         memory_id = str(metadata.get("id", ""))
         required = ("id", "title", "type", "scope", "status", "summary", "confidence", "authority", "updated")
         for key in required:
-            if key not in metadata or metadata.get(key) in {None, ""}:
+            if key not in metadata or metadata.get(key) in (None, ""):
                 issues.append(
                     ValidationIssue(
                         "error" if key in {"id", "type", "scope", "summary"} else "warning",
@@ -442,19 +358,21 @@ class Validator:
                         {"field": key},
                     )
                 )
-        if metadata.get("type") and metadata["type"] not in VALID_TYPES:
+        if metadata.get("type") and (not isinstance(metadata["type"], str) or metadata["type"] not in VALID_TYPES):
             issues.append(
                 ValidationIssue("error", "invalid-type", path, f"Unknown memory type {metadata['type']!r}", memory_id)
             )
-        if metadata.get("kind") and metadata["kind"] not in VALID_KINDS:
+        if metadata.get("kind") and (not isinstance(metadata["kind"], str) or metadata["kind"] not in VALID_KINDS):
             issues.append(
                 ValidationIssue("error", "invalid-kind", path, f"Unknown memory kind {metadata['kind']!r}", memory_id)
             )
-        if metadata.get("scope") and metadata["scope"] not in VALID_SCOPES:
+        if metadata.get("scope") and (not isinstance(metadata["scope"], str) or metadata["scope"] not in VALID_SCOPES):
             issues.append(
                 ValidationIssue("error", "invalid-scope", path, f"Unknown scope {metadata['scope']!r}", memory_id)
             )
-        if metadata.get("status") and metadata["status"] not in VALID_STATUSES:
+        if metadata.get("status") and (
+            not isinstance(metadata["status"], str) or metadata["status"] not in VALID_STATUSES
+        ):
             issues.append(
                 ValidationIssue("error", "invalid-status", path, f"Unknown status {metadata['status']!r}", memory_id)
             )
@@ -468,7 +386,10 @@ class Validator:
                     "error", "invalid-confidence", path, "confidence must be between 0 and 1", memory_id, True
                 )
             )
-        schema_version = int(metadata.get("schema_version", 1) or 1)
+        try:
+            schema_version = int(metadata.get("schema_version", 1) or 1)
+        except (ValueError, TypeError):
+            schema_version = 2
         if schema_version < 2:
             issues.append(
                 ValidationIssue(
@@ -495,7 +416,11 @@ class Validator:
                         {"json_path": list(error.absolute_path)},
                     )
                 )
-        if int(metadata.get("token_cost", 0) or 0) > 1600:
+        try:
+            oversized = int(metadata.get("token_cost", 0) or 0) > 1600
+        except (ValueError, TypeError):
+            oversized = False
+        if oversized:
             issues.append(
                 ValidationIssue(
                     "warning",

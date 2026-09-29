@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from .config import KBConfig
 from .markdown import dump_frontmatter, parse_markdown
 from .models import TYPE_KIND
+from .storage import semantic_transaction
 from .util import atomic_write, utc_now
 
 
@@ -42,15 +44,18 @@ def migrate_metadata(metadata: dict[str, Any]) -> tuple[dict[str, Any], list[str
 def migrate_vault(config: KBConfig, apply: bool = False) -> dict[str, Any]:
     results = []
     ignored = {".git", ".obsidian", ".kb", ".kb-evidence", ".kb-memory-events", ".kb-episodes", ".venv"}
-    for path in config.vault.rglob("*.md"):
-        relative = path.relative_to(config.vault)
-        if any(part in ignored for part in relative.parts):
-            continue
-        text = path.read_text(encoding="utf-8")
-        parsed = parse_markdown(text)
-        metadata, changed = migrate_metadata(parsed.metadata)
-        if changed:
-            if apply:
-                atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
-            results.append({"path": relative.as_posix(), "changes": changed, "applied": apply})
+    with semantic_transaction(config.vault) if apply else nullcontext():
+        for path in config.vault.rglob("*.md"):
+            relative = path.relative_to(config.vault)
+            if any(part in ignored for part in relative.parts):
+                continue
+            if path.is_symlink() or not path.resolve().is_relative_to(config.vault.resolve()):
+                continue
+            text = path.read_text(encoding="utf-8")
+            parsed = parse_markdown(text)
+            metadata, changed = migrate_metadata(parsed.metadata)
+            if changed:
+                if apply:
+                    atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
+                results.append({"path": relative.as_posix(), "changes": changed, "applied": apply})
     return {"mode": "apply" if apply else "dry-run", "memories": len(results), "results": results}

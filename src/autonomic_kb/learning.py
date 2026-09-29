@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +12,9 @@ from .evidence import EvidenceStore, OperationLedger
 from .git_context import inspect_git, recent_commit_summary
 from .index import KnowledgeIndex
 from .markdown import render_note
-from .security import instruction_authorized, scan_content
-from .util import estimate_tokens, jaccard, sha256_text, slugify, utc_now
+from .security import instruction_authorized, reject_secrets, scan_content
+from .storage import semantic_transaction
+from .util import atomic_write, estimate_tokens, jaccard, sha256_file, sha256_text, slugify, stable_json, utc_now
 
 
 @dataclass(slots=True)
@@ -43,6 +44,10 @@ class LearningCandidate:
     valid_from: str = ""
     valid_to: str = ""
     version_range: str = ""
+    version_package: str = ""
+    preconditions: list[str] = field(default_factory=list)
+    verification: str = ""
+    dependencies: list[dict[str, str]] = field(default_factory=list)
 
     def score(self) -> float:
         benefit = (
@@ -60,6 +65,7 @@ class LearningCandidate:
     def from_dict(cls, value: dict[str, Any]) -> LearningCandidate:
         aliases = {"type": "memory_type", "body": "detail", "source": "provenance"}
         normalized = {aliases.get(key, key): item for key, item in value.items()}
+        normalized.update(authority="agent", taint="agent", authorized_instruction=False)
         allowed = set(cls.__dataclass_fields__)
         return cls(**{key: item for key, item in normalized.items() if key in allowed})
 
@@ -77,22 +83,78 @@ class Learner:
         if self._owns_index:
             self.index.close()
 
+    def _applicability(self, candidate: LearningCandidate) -> dict[str, Any]:
+        git = inspect_git(self.config.repo or self.config.vault)
+        return {
+            "repository_id": git.repository_id,
+            "branch": git.branch if candidate.scope == "branch" else "",
+            "applies_to": sorted(candidate.applies_to),
+            "preconditions": candidate.preconditions,
+            "valid_from": candidate.valid_from,
+            "valid_to": candidate.valid_to,
+            "version_range": candidate.version_range,
+            "version_package": candidate.version_package,
+            "dependencies": candidate.dependencies,
+        }
+
     def _near_duplicate(self, candidate: LearningCandidate) -> dict[str, Any] | None:
+        applicability = self._applicability(candidate)
         for note in self.index.all_notes({"active", "inbox", "stale", "conflicted"}):
             if note.get("scope") != candidate.scope or note.get("type") != candidate.memory_type:
                 continue
-            similarity = jaccard(candidate.summary, str(note.get("summary", "")))
             metadata = note.get("metadata", {})
+            if metadata.get("applicability") != applicability:
+                continue
+            if (
+                candidate.claim_key
+                and metadata.get("claim_key") == candidate.claim_key
+                and metadata.get("claim_value") != candidate.claim_value
+            ):
+                return {"note": note, "kind": "conflict", "similarity": 0.0}
+            if metadata.get("verification", "") != candidate.verification:
+                continue
+            if str(note.get("l2", "")).strip() != (candidate.detail or candidate.summary).strip():
+                continue
+            similarity = jaccard(candidate.summary, str(note.get("summary", "")))
             if candidate.claim_key and metadata.get("claim_key") == candidate.claim_key:
-                if metadata.get("claim_value") == candidate.claim_value:
-                    return {"note": note, "kind": "same-claim", "similarity": max(similarity, 0.95)}
-                return {"note": note, "kind": "conflict", "similarity": similarity}
-            if similarity >= 0.94:
-                return {"note": note, "kind": "paraphrase", "similarity": similarity}
+                kind = "same-claim" if metadata.get("claim_value") == candidate.claim_value else "conflict"
+                return {"note": note, "kind": kind, "similarity": similarity}
+            if candidate.summary.strip() == str(note.get("summary", "")).strip():
+                return {"note": note, "kind": "exact", "similarity": 1.0}
         return None
 
     def remember(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
+        reject_secrets(asdict(candidate))
+        with semantic_transaction(self.config.vault):
+            try:
+                return self._remember_locked(candidate, force)
+            except Exception:
+                self.index.connection.rollback()
+                raise
+
+    def _remember_locked(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
         self.index.index_vault()
+        if self.config.repo:
+            for source in candidate.provenance:
+                value = source.get("path") or source.get("value") if isinstance(source, dict) else None
+                if value:
+                    path = (self.config.repo / str(value)).resolve()
+                    if not path.is_relative_to(self.config.repo.resolve()):
+                        raise ValueError("source path escaped repository")
+                    if path.is_file():
+                        dependency = {
+                            "path": path.relative_to(self.config.repo).as_posix(),
+                            "sha256": sha256_file(path),
+                        }
+                        if dependency not in candidate.dependencies:
+                            candidate.dependencies.append(dependency)
+        for identity in candidate.evidence:
+            record = self.evidence.get(identity)
+            if not record:
+                raise ValueError("candidate references missing or tampered evidence")
+            repo_id = inspect_git(self.config.repo or self.config.vault).repository_id
+            if record.repository_id and record.repository_id != repo_id:
+                raise ValueError("candidate evidence belongs to another repository")
         score = candidate.score()
         text = candidate.title + "\n" + candidate.summary + "\n" + candidate.detail
         findings = scan_content(text)
@@ -105,6 +167,23 @@ class Learner:
         duplicate = self._near_duplicate(candidate)
         if duplicate and duplicate["kind"] != "conflict":
             note = duplicate["note"]
+            novel = set(candidate.evidence) - set(note["metadata"].get("evidence", []))
+            if novel:
+                from .markdown import dump_frontmatter, parse_markdown
+
+                path = self.config.vault / note["path"]
+                parsed = parse_markdown(path.read_text(encoding="utf-8"))
+                parsed.metadata["evidence"] = sorted(set(parsed.metadata.get("evidence", [])) | novel)
+                updated = dump_frontmatter(parsed.metadata) + parsed.body
+                atomic_write(path, updated)
+                self.operations.append(
+                    "AMEND",
+                    note["id"],
+                    basis=sorted(novel),
+                    new_digest=sha256_text(updated),
+                    reason="attach corroborating evidence",
+                )
+                self.index.index_vault(force=True)
             return {
                 "action": "duplicate",
                 "memory_id": note["declared_id"] or note["id"],
@@ -126,7 +205,18 @@ class Learner:
             "inbox": self.config.inbox_dir,
             "conflicted": self.config.inbox_dir,
         }.get(status, self._directory_for_type(candidate.memory_type))
-        fingerprint = sha256_text(candidate.scope + "\n" + candidate.memory_type + "\n" + candidate.summary.lower())[:8]
+        fingerprint = sha256_text(
+            stable_json(
+                [
+                    candidate.scope,
+                    candidate.memory_type,
+                    candidate.summary,
+                    candidate.detail,
+                    candidate.verification,
+                    self._applicability(candidate),
+                ]
+            )
+        )[:12]
         memory_id = f"kb:{candidate.scope}:{candidate.memory_type}:{slugify(candidate.title, 48)}-{fingerprint}"
         existing = self.index.get(memory_id)
         if existing:
@@ -178,6 +268,11 @@ class Learner:
             "provenance": candidate.provenance,
             "evidence": evidence_ids,
             "validators": candidate.validators,
+            "dependencies": candidate.dependencies,
+            "preconditions": candidate.preconditions,
+            "verification": candidate.verification,
+            "version_package": candidate.version_package,
+            "applicability": self._applicability(candidate),
             "relations": candidate.relations,
             "invalidation": {"paths": candidate.applies_to, "branch": bool(candidate.scope == "branch")},
         }
@@ -190,7 +285,7 @@ class Learner:
                 duplicate["note"]["declared_id"] or duplicate["note"]["id"]
             )
         layers = {
-            0: candidate.summary[:140],
+            0: candidate.summary,
             1: candidate.summary,
             2: candidate.detail or candidate.summary,
             3: candidate.detail,
@@ -206,7 +301,7 @@ class Learner:
         absolute = self.config.vault / relative
         absolute.parent.mkdir(parents=True, exist_ok=True)
         rendered = render_note(metadata, layers)
-        absolute.write_text(rendered, encoding="utf-8")
+        atomic_write(absolute, rendered)
         self.operations.append(
             "ADD",
             memory_id,
@@ -292,7 +387,10 @@ class Learner:
         results: list[dict[str, Any]] = []
         candidates: list[LearningCandidate] = []
         for observation in episode.observations:
-            if force or self.episodes.recurrence(observation) >= self.config.recurrence_threshold:
+            if (
+                force
+                or self.episodes.recurrence(observation, episode.repository_id) >= self.config.recurrence_threshold
+            ):
                 candidates.append(
                     LearningCandidate(
                         title=observation[:80],
@@ -311,7 +409,7 @@ class Learner:
                     )
                 )
         for failed in episode.failed_hypotheses:
-            if force or self.episodes.recurrence(failed) >= self.config.recurrence_threshold:
+            if force or self.episodes.recurrence(failed, episode.repository_id) >= self.config.recurrence_threshold:
                 candidates.append(
                     LearningCandidate(
                         title=f"Negative result: {failed[:60]}",
@@ -329,6 +427,35 @@ class Learner:
                         provenance=[{"kind": "episode", "id": episode.episode_id}],
                     )
                 )
+        current_repository = inspect_git(self.config.repo or self.config.vault).repository_id
+        if episode.repository_id != current_repository:
+            raise ValueError("episode belongs to another repository")
+        proof = [self.evidence.get(identity) for identity in episode.evidence]
+        independently_checked = any(record and record.kind == "evaluation" for record in proof)
+        if (
+            episode.successful_actions
+            and episode.outcome == "success"
+            and independently_checked
+            and episode.verification
+        ):
+            steps = "\n".join(episode.successful_actions)
+            candidates.append(
+                LearningCandidate(
+                    title=f"Procedure: {episode.task[:65]}",
+                    summary=episode.task,
+                    detail=steps,
+                    memory_type="procedure",
+                    confidence=0.9,
+                    reuse_likelihood=0.8,
+                    token_savings=0.85,
+                    authority="derived",
+                    taint="derived",
+                    evidence=list(episode.evidence),
+                    preconditions=list(episode.preconditions),
+                    verification=episode.verification,
+                    provenance=[{"kind": "episode", "id": episode.episode_id}],
+                )
+            )
         for candidate in candidates:
             results.append(self.remember(candidate))
         return results

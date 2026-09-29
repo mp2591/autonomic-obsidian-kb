@@ -1,5 +1,7 @@
 # Token and task economics
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 The objective is expected total task utility, not retrieval recall.
 
 ```text

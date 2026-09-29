@@ -2,19 +2,29 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .applicability import requested_time
 from .calibration import RankPolicy
 from .code_graph import RepositoryCodeGraph
+from .compiler import compile_task_view
 from .config import KBConfig
+from .context_state import ContextStateStore
+from .evidence import EvidenceStore
 from .git_context import inspect_git
 from .index import KnowledgeIndex
 from .models import RetrievalItem, RetrievalManifest, TaskContext
 from .observability import TraceRecorder
+from .query_plan import build_query_plan
+from .read_policy import conflicting_claim_ids, memory_read_gate
 from .scoring import classify_risk, classify_task, feature_vector, score_note
+from .security import reject_secrets
 from .semantic import LocalEmbeddingBackend
-from .util import estimate_tokens, jaccard, terms
+from .sufficiency import assess_sufficiency
+from .tokenizer import TOKENIZERS
+from .util import atomic_write, jaccard, sha256_text, stable_json, terms
 
 _TEMPORAL = re.compile(
     r"\b(previous|old|older|before|after|as of|version|release|branch|commit|historical|then)\b", re.I
@@ -27,8 +37,12 @@ _EXACTISH = re.compile(
 def reciprocal_rank_fusion(result_sets: dict[str, list[dict[str, Any]]], k: int = 60) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for route, rows in result_sets.items():
+        seen = set()
         for rank, row in enumerate(rows, 1):
             identity = str(row["id"])
+            if identity in seen:
+                continue
+            seen.add(identity)
             target = merged.setdefault(identity, dict(row))
             target.setdefault("route_sources", [])
             if route not in target["route_sources"]:
@@ -93,7 +107,7 @@ class Retriever:
 
     def choose_route(self, context: TaskContext) -> str:
         stripped = context.task.strip()
-        if len(terms(stripped)) <= 1 and not context.requested_paths:
+        if (not terms(stripped) or stripped.lower() in {"hello", "hi", "thanks"}) and not context.requested_paths:
             return "none"
         if _TEMPORAL.search(stripped):
             return "temporal"
@@ -108,7 +122,10 @@ class Retriever:
         if route == "none":
             return sets
         if "exact" in route or route == "hybrid":
+            plan = build_query_plan(context)
             sets["exact"] = self.index.search_exact(context.task, min(40, self.config.max_candidates))
+            for identifier in plan.identifiers:
+                sets["exact"].extend(self.index.search_exact(identifier, 12))
             for path in context.requested_paths[:8]:
                 sets.setdefault("path", []).extend(self.index.search_exact(path, 12))
         symbol_hint = " ".join(context.changed_symbols[:8])
@@ -135,25 +152,77 @@ class Retriever:
         session: str = "",
         include_uncertain: bool = False,
         route_override: str | None = None,
+        *,
+        epoch: str = "",
+        at: str = "",
+        versions: dict[str, str] | None = None,
+        record: bool = True,
     ) -> RetrievalManifest:
+        reject_secrets(task)
+        budget = self.config.default_budget if budget is None else int(budget)
+        if budget < 80:
+            raise ValueError("budget must be at least 80; it is never silently increased")
         self.index.index_vault()
-        budget = max(80, int(budget or self.config.default_budget))
         context = self.build_context(task, paths, agent, session)
+        plan = build_query_plan(context)
+        context.requested_paths = plan.paths
+        context.at = at or requested_time(task)
+        context.versions = dict(versions or {})
         route = route_override or self.choose_route(context)
+        if route not in {"none", "exact+lexical", "lexical", "hybrid", "temporal"}:
+            raise ValueError("unsupported retrieval route")
         trace_id = self.traces.new_trace_id()
         retrieval_id = uuid.uuid4().hex[:16]
         with self.traces.span(
             trace_id, "retrieval", retrieval_id=retrieval_id, route=route, budget=budget, task_hash=context.task_hash
         ):
-            result_sets = self._candidate_sets(context, route)
-            fused = reciprocal_rank_fusion(result_sets, self.config.rrf_k)
-            # Strong seeds add a bounded graph channel; graph never bypasses gates.
-            seed_ids = [row["id"] for row in fused[:3]]
-            if seed_ids and route in {"hybrid", "temporal", "exact+lexical"}:
-                result_sets["graph"] = self.index.neighbors(seed_ids, limit=24)
+            notes = self.index.all_notes()
+            counts = Counter(note["declared_id"] for note in notes if note["declared_id"])
+            eligible = []
+            gate_exclusions = []
+            evidence_store = EvidenceStore(self.config)
+            for note in notes:
+                allowed, reason = memory_read_gate(
+                    note,
+                    context,
+                    allow_untrusted=include_uncertain or self.config.allow_untrusted,
+                    allow_cross_repo=self.config.allow_cross_repo,
+                    repo_path=self.config.repo,
+                )
+                if counts.get(note["declared_id"], 0) > 1:
+                    allowed, reason = False, "duplicate canonical identity"
+                evidence = note.get("metadata", {}).get("evidence", [])
+                if (
+                    allowed
+                    and evidence
+                    and (
+                        not isinstance(evidence, list)
+                        or not all(evidence_store.verify(str(identity)) for identity in evidence)
+                    )
+                ):
+                    allowed, reason = False, "evidence missing or invalid"
+                if allowed:
+                    eligible.append(note["id"])
+                else:
+                    gate_exclusions.append({"id": note["id"], "reason": reason})
+            eligible_set = set(eligible)
+            conflicts = conflicting_claim_ids([note for note in notes if note["id"] in eligible_set])
+            eligible = [identity for identity in eligible if identity not in conflicts]
+            gate_exclusions.extend(
+                {"id": identity, "reason": "unresolved contradiction"} for identity in sorted(conflicts)
+            )
+            try:
+                self.index.set_eligible(eligible)
+                result_sets = self._candidate_sets(context, route)
                 fused = reciprocal_rank_fusion(result_sets, self.config.rrf_k)
+                seed_ids = [row["id"] for row in fused[:3]]
+                if seed_ids and route in {"hybrid", "temporal", "exact+lexical"}:
+                    result_sets["graph"] = self.index.neighbors(seed_ids, limit=24)
+                    fused = reciprocal_rank_fusion(result_sets, self.config.rrf_k)
+            finally:
+                self.index.set_eligible(None)
             scored: list[tuple[float, dict[str, Any], list[str]]] = []
-            excluded: list[dict[str, Any]] = []
+            excluded: list[dict[str, Any]] = list(gate_exclusions)
             decisions: list[dict[str, Any]] = []
             allow_untrusted = include_uncertain or self.config.allow_untrusted
             for note in fused:
@@ -165,6 +234,7 @@ class Retriever:
                     self.config.repo,
                     self.rank_policy.weights,
                     self.rank_policy.intercept,
+                    calibrated=self.rank_policy.version == "rank-v3-learned",
                 )
                 if gate:
                     excluded.append({"id": note["id"], "path": note["path"], "reason": gate, "score": 0.0})
@@ -178,32 +248,27 @@ class Retriever:
                 else:
                     scored.append((score, note, reasons))
             scored.sort(key=lambda value: (-value[0], value[1]["token_cost"], value[1]["id"]))
-            for _, note, _ in scored:
-                self.index.record_rank_example(
-                    retrieval_id, note["id"], feature_vector(note, context, self.config.repo), False
-                )
             reserved = min(88, max(32, budget // 12))
             remaining = budget - reserved
             items, remaining = self._allocate_set(scored, remaining, depth, context, decisions, excluded, agent)
+            source_notes = {note["id"]: note for _, note, _ in scored}
             for item in items:
-                internal = self.index.get(item.id)
-                if internal:
-                    self.index.record_rank_example(
-                        retrieval_id, internal["id"], feature_vector(internal, context, self.config.repo), True
-                    )
-            used = budget - remaining
+                note = source_notes[item.id]
+                item.revision = sha256_text(stable_json([note["source_hash"], agent, item.layer, item.text]))
+
+            def sufficiency():
+                selected = [dict(source_notes[item.id], delivered_text=item.text) for item in items]
+                return assess_sufficiency(context, selected)
+
+            state, missing = sufficiency()
             if route == "none":
-                state = "no_retrieval_needed"
-            elif not items and any("conflict" in str(item.get("reason", "")) for item in excluded):
+                state, missing = "no_retrieval_needed", []
+            elif not items and any("contradiction" in str(row["reason"]) for row in excluded):
                 state = "conflicting_evidence"
-            elif not items:
-                state = "insufficient_evidence"
-            else:
-                state = "sufficient_context"
             manifest = RetrievalManifest(
                 task=task,
                 budget=budget,
-                used_tokens=min(budget, used),
+                used_tokens=0,
                 items=items,
                 excluded=excluded[:80],
                 context=context,
@@ -211,9 +276,60 @@ class Retriever:
                 route=route,
                 state=state,
                 trace_id=trace_id,
+                missing_evidence=missing,
+                token_count_exact=TOKENIZERS.count("", agent).exact,
             )
+
+            # Bound both emitted representations, never the diagnostic manifest.
+            def delivered_cost():
+                return max(
+                    TOKENIZERS.count(manifest.to_markdown(), agent).tokens,
+                    TOKENIZERS.count(stable_json(manifest.to_agent_dict()), agent).tokens,
+                )
+
+            while items and delivered_cost() > budget:
+                removed = items.pop()
+                excluded.append({"id": removed.id, "reason": "final payload budget"})
+                manifest.state, manifest.missing_evidence = sufficiency()
+            if delivered_cost() > budget:
+                manifest.delivery = "Insufficient budget for context."
+            manifest.used_tokens = delivered_cost()
+            if manifest.used_tokens > budget:
+                raise ValueError("budget cannot fit the minimum response with this tokenizer")
+            delivered_items = list(items)
+            inventory = ContextStateStore(self.config.runtime_dir / "context-state")
+            previous = inventory.get(session) if session and epoch else None
+            if previous and previous.epoch == epoch:
+                manifest.items = [item for item in items if previous.revisions.get(item.id) != item.revision]
+                if delivered_items and not manifest.items:
+                    manifest.state, manifest.missing_evidence = "unchanged_context", []
+                manifest.used_tokens = delivered_cost()
+            # Trace data is not injected. A receipt records the selected representation
+            # and source revision for acknowledgement and action-time checks.
+            if record:
+                receipt = {
+                    "session": session,
+                    "epoch": epoch,
+                    "repository_id": context.repository_id,
+                    "revisions": {item.id: item.revision for item in delivered_items},
+                    "source_revisions": {item.id: source_notes[item.id]["source_hash"] for item in delivered_items},
+                    "manifest": manifest.to_dict(),
+                }
+                atomic_write(self.config.runtime_dir / "receipts" / f"{retrieval_id}.json", stable_json(receipt))
+                selected_ids = {item.id for item in manifest.items}
+                for _, note, _ in scored:
+                    self.index.record_rank_example(
+                        retrieval_id,
+                        note["id"],
+                        feature_vector(note, context, self.config.repo),
+                        note["id"] in selected_ids,
+                    )
+            else:
+                return manifest
+            for decision in decisions:
+                decision["selected"] = decision["id"] in selected_ids
             self.index.record_decisions(retrieval_id, decisions)
-            self.index.record_usage(retrieval_id, context.task_hash, [item.to_dict() for item in items])
+            self.index.record_usage(retrieval_id, context.task_hash, [item.to_dict() for item in manifest.items])
             self.index.events.emit(
                 "retrieve.completed",
                 retrieval_id=retrieval_id,
@@ -246,12 +362,13 @@ class Retriever:
             best_gain = -1.0
             best_payload: tuple[int, str, int, float] | None = None
             for idx, (score, note, _) in enumerate(pool):
-                layer, text = self._select_layer(note, score, depth)
-                token_cost = estimate_tokens(text, agent) + 14
-                while layer > 0 and token_cost > remaining:
-                    layer -= 1
-                    text = str(note.get(f"l{layer}") or note.get("summary") or note.get("title"))
-                    token_cost = estimate_tokens(text, agent) + 14
+                preferred, _ = self._select_layer(note, score, depth)
+                if depth == "auto" and build_query_plan(context).intent in {"debug", "procedure"}:
+                    preferred = max(preferred, 2)
+                layer, text = compile_task_view(note, context.task, preferred, max(0, remaining - 14), agent)
+                if not text:
+                    continue
+                token_cost = TOKENIZERS.count(text, agent).tokens + 14
                 if token_cost > remaining:
                     continue
                 redundancy = max((jaccard(text, item.text) for item in items), default=0.0)

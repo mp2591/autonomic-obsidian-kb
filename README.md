@@ -12,28 +12,34 @@ total task cost = retrieval + injected context + search/discovery
 
 A memory is therefore not “text that matched a query.” It is a scoped, temporally applicable, provenance-bearing claim, procedure, decision, constraint, failure, negative result, summary, or episode whose value can be measured against real agent work.
 
-## V2 architecture
+## V3: connected, tested context infrastructure
 
-V2 preserves the original invariants—Markdown authority, disposable indexes, hard scope/trust gates, progressive disclosure, conservative healing—and adds the control and evidence layers needed for a genuinely autonomic system:
+Version **0.3.0** repairs the gap between architecture claims and the execution path. Query planning, source applicability, safe read gates, whole-representation compilation, explicit partial evidence, delivery counting, and host-acknowledged context deltas now participate in retrieval. The full implementation map, migration contract, and deliberate limitations are in [V3 implementation](docs/v3-implementation.md).
+
+**No empirical agent-token savings are claimed by the regression suite.** Unknown usage stays unknown. Default token counts are labeled estimates; an exact profile requires a registered exact tokenizer. Memory and receipts never authorize actions.
+
+## Architecture
+
+V3 preserves the original invariants—Markdown authority, disposable indexes, hard scope/trust gates, progressive disclosure, conservative healing—and adds the control and evidence layers used by the current conservative control path:
 
 - **Obsidian Markdown remains human-readable semantic authority.**
 - **Content-addressed evidence objects** preserve source spans, observations, task episodes, test/command results, and corrections.
 - **Append-only memory operations** (`ADD`, `AMEND`, `SUPERSEDE`, `RETRACT`, `MERGE`, `SPLIT`, `REVALIDATE`, `QUARANTINE`, `ARCHIVE`) make semantic evolution auditable.
-- **Schema v2** adds memory families, repository identity, bitemporal validity, provenance taint, evidence, validators, and instruction authorization while retaining legacy-v1 compatibility.
+- **Schema v2** adds memory families, repository identity, explicit valid-time intervals and source applicability, provenance taint, evidence, validators, and instruction authorization while retaining legacy-v1 compatibility.
 - **Incremental indexing** skips unchanged Markdown by stat manifest; SQLite/FTS5 remains disposable.
-- **Adaptive retrieval routing** can choose no retrieval, exact+lexical, lexical, hybrid, or temporal paths.
+- **Deterministic task-aware retrieval routing** can choose no retrieval, exact+lexical, lexical, hybrid, or temporal paths.
 - **Candidate fusion** uses Reciprocal Rank Fusion across exact, lexical, expanded, graph, and optional local-dense channels.
-- **Outcome-calibrated ranking** learns only soft utility weights from feedback; scope, trust, authorization, and validity are hard non-learnable constraints.
+- **Fixed, versioned ranking** keeps learned-policy activation disabled in this release. Feedback and route features remain available for offline evaluation; hard gates never depend on learned weights.
 - **Set-level budget allocation** rewards coverage/complementarity and penalizes redundancy, uncertainty, risk, and token cost.
-- **Task-specific context compilation** preserves exact commands/identifiers while compressing irrelevant detail.
-- **Temporal and Git-lineage gates** distinguish current truth from historical truth.
-- **Executable validation** is allowlisted, repository-contained, timeout-bounded, and evidence-producing.
-- **Rollback-safe healing** restores backups if automatic repair makes validation worse.
+- **Task-planned context compilation** selects whole representations and preserves commands, preconditions, and verification without unsafe sentence splicing.
+- **Temporal, version, and source gates** check declared applicability; Git ancestry alone is not continuing validity.
+- **Non-executable validation** checks schema, evidence, file existence, and source hashes. Note-defined command execution is disabled.
+- **Transactional healing** restores semantic files and events on handled failures; interrupted journals fail closed pending reconciliation.
 - **Episodic capture and recurrence consolidation** prevent every observation from becoming canonical memory.
 - **Multi-agent leases** reduce duplicate investigations.
-- **Task traces, feedback, paired outcomes, shadow retrieval, and matched replay** turn memory policy into a measurable control problem.
+- **Task traces, durable feedback/outcomes, isolated replay, and shadow policies** expose measurement without equating a proxy score with demonstrated avoided work.
 - **Optional local embeddings** remain evidence-gated and never replace lexical or policy gates.
-- **Real Obsidian + official CLI CI** remains release-blocking.
+- **Real Obsidian + official CLI CI** remains required by the release process; use repository rulesets to enforce required checks at merge time.
 
 ## Durable versus derived state
 
@@ -42,22 +48,24 @@ Durable / Git-friendly
 ├── Markdown memories                  human semantic projection
 ├── .kb-evidence/                      content-addressed evidence objects
 ├── .kb-memory-events/                 append-only semantic operations
-└── .kb-episodes/                      raw task episodes
+├── .kb-episodes/                      raw task episodes
+├── .kb-feedback.jsonl                 durable feedback
+└── .kb-outcomes.jsonl                 durable task outcomes
 
 Disposable / rebuildable
 └── .kb/
     ├── index.sqlite3                  FTS, graph, decisions, rank examples
     ├── actions.jsonl                  autonomous actions
     ├── traces.jsonl                   task/retrieval spans
-    ├── feedback.jsonl                 retrieval feedback
-    ├── outcomes.jsonl                 paired task outcomes
     ├── rank-policy.json               learned soft ranking policy
     ├── code-graph.json                repository code projection
     ├── embeddings-*.json              optional dense cache
+    ├── receipts/                      source/representation revisions
+    ├── context-state/                 host-acknowledged context inventory
     └── leases/                        short-lived multi-agent leases
 ```
 
-Deleting `.kb/` cannot destroy canonical knowledge or evidence.
+Deleting `.kb/` cannot destroy canonical knowledge or evidence. First-use telemetry migration preserves legacy outcome/feedback rows outside `.kb/`; see the migration contract before cleaning an existing installation.
 
 ## Retrieval pipeline
 
@@ -89,7 +97,7 @@ task + budget
                 │
        task-specific L0-L3 context compiler
                 │
-      proof-bearing minimal context manifest
+      counted minimal context + diagnostic source receipt
 ```
 
 The system is allowed to return `no_retrieval_needed`, `insufficient_evidence`, or `conflicting_evidence`. Empty context is a legitimate decision.
@@ -108,7 +116,7 @@ export KB_VAULT=~/Knowledge/agent-memory
 kb doctor
 ```
 
-Retrieve under a hard budget:
+Retrieve with a final-payload budget under the explicitly reported token counter:
 
 ```bash
 kb --vault "$KB_VAULT" --repo "$PWD" \
@@ -146,24 +154,24 @@ Consolidation can be recurrence-triggered or explicitly forced for a proven high
 ```bash
 kb feedback <retrieval-id> <memory-id> helpful
 kb feedback <retrieval-id> <memory-id> incorrect --notes "Version changed"
-kb calibrate
+kb calibrate                 # reports explicitly disabled; no policy changes
 ```
 
-`kb calibrate` trains only soft ranking weights. It cannot learn to bypass repository scope, trust, privileged-instruction authorization, quarantine, or temporal validity.
+`kb calibrate` reports that learned ranking is disabled. Neither the command nor persisted learned-policy files can activate a replacement policy in this release.
 
-Record matched real-agent outcomes:
+Record descriptive outcomes; qualified matched experiments additionally require explicit experiment identities and independent evaluation:
 
 ```bash
 kb outcome --task "fix indexing bug" --mode no-kb --success \
-  --input-tokens 6000 --searches 12 --file-reads 18
+  --input-tokens 6000 --output-tokens 900 --maintenance-tokens 0 --searches 12 --file-reads 18
 
 kb outcome --task "fix indexing bug" --mode kb --success \
-  --input-tokens 2300 --searches 4 --file-reads 6
+  --input-tokens 2300 --output-tokens 900 --maintenance-tokens 100 --searches 4 --file-reads 6
 
 kb benchmark --traces
 ```
 
-For reproducible external-agent experiments, use `kb replay --spec replay.json`; commands are argv arrays and are never passed through a shell.
+For reproducible external-agent experiments, use `kb replay --spec replay.json --allow-execution`; trusted host commands are argv arrays, each arm uses isolated snapshots, and a separate evaluator is mandatory. This is not an OS sandbox.
 
 ## Validation and self-healing
 
@@ -174,7 +182,7 @@ kb heal             # dry-run
 kb heal --apply     # backup + apply + post-validation + rollback on regression
 ```
 
-Validator types include repository-contained file existence, source hashes, and allowlisted argv-based command execution. Shell syntax is rejected.
+Validator types include repository-contained file existence and source hashes. All note-defined command validators are rejected without execution, including formerly allowlisted commands.
 
 ## Multi-agent coordination
 
@@ -198,7 +206,7 @@ Optional local dense retrieval is enabled only by configuration and the `embeddi
 
 ## MCP
 
-`kb mcp` serves stdio MCP with backward negotiation for `2025-06-18` and support for `2025-11-25` resources/tools. It exposes retrieval, context, evidence inspection, feedback, validation, leases, dashboards, and memory inspection. stdio remains the default security boundary.
+`kb mcp` serves stdio MCP with backward negotiation for `2025-06-18` and support for the implemented `2025-11-25` resources/tools subset. It exposes retrieval, context, evidence inspection, feedback, validation, leases, scoped catalogs, context acknowledgements, and source receipts. Agent retrieval has one bounded content representation; diagnostic manifests are requested separately. stdio remains the default security boundary.
 
 ## Obsidian compatibility
 

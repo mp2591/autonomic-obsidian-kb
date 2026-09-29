@@ -1,5 +1,7 @@
 # Retrieval v2
 
+> V3 implementation status and limitations are specified in [V3 implementation](v3-implementation.md). This document retains design context; it is not a claim of measured agent savings.
+
 Retrieval is a constrained decision system, not top-k similarity.
 
 1. Refresh the stat-backed incremental index.

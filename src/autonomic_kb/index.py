@@ -11,6 +11,7 @@ from .config import KBConfig
 from .markdown import parse_markdown
 from .models import MemoryRecord
 from .observability import EventLog
+from .storage import recover_transactions, vault_lock
 from .util import stable_json, terms, utc_now
 
 SCHEMA_VERSION = 2
@@ -42,6 +43,8 @@ class KnowledgeIndex:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.fts5 = False
         self._ensure_schema()
+        parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
+        self._requires_reparse = not parser or parser[0] != "v3.0.0"
         self.events = EventLog(config.log_path)
 
     def close(self) -> None:
@@ -170,6 +173,19 @@ class KnowledgeIndex:
         return self.index_vault(force=True)
 
     def index_vault(self, force: bool = False) -> IndexStats:
+        with vault_lock(self.config.vault):
+            recover_transactions(self.config.vault)
+            result = self._index_vault(force or self._requires_reparse)
+            if self._requires_reparse:
+                self.connection.execute(
+                    "INSERT INTO meta(key,value) VALUES('parser_format','v3.0.0') "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+                )
+                self.connection.commit()
+                self._requires_reparse = False
+            return result
+
+    def _index_vault(self, force: bool = False) -> IndexStats:
         stats = IndexStats(fts5=self.fts5)
         existing = {
             row["path"]: dict(row)
@@ -184,6 +200,8 @@ class KnowledgeIndex:
         declared_paths: dict[str, list[str]] = {}
         for absolute in self._markdown_paths():
             relative = absolute.relative_to(self.config.vault).as_posix()
+            if absolute.is_symlink() or not absolute.resolve().is_relative_to(self.config.vault.resolve()):
+                continue
             seen_paths.add(relative)
             stats.scanned += 1
             stat = absolute.stat()
@@ -198,6 +216,8 @@ class KnowledgeIndex:
             ):
                 stats.unchanged += 1
                 declared_paths.setdefault(str(current.get("declared_id") or current["id"]), []).append(relative)
+                continue
+            if absolute.is_symlink() or not absolute.resolve().is_relative_to(self.config.vault.resolve()):
                 continue
             text = absolute.read_text(encoding="utf-8", errors="replace")
             record = MemoryRecord.from_text(relative, text)
@@ -382,13 +402,30 @@ class KnowledgeIndex:
             rows = self.connection.execute("SELECT * FROM notes ORDER BY path").fetchall()
         return [self._row(row) for row in rows]
 
+    def set_eligible(self, identities: list[str] | None) -> None:
+        """Per-request candidate gate; applies before lexical/exact/graph limits."""
+        self._eligible = identities is not None
+        self.connection.execute("CREATE TEMP TABLE IF NOT EXISTS retrieval_eligible(id TEXT PRIMARY KEY)")
+        self.connection.execute("DELETE FROM retrieval_eligible")
+        if identities:
+            self.connection.executemany(
+                "INSERT OR IGNORE INTO retrieval_eligible(id) VALUES(?)", ((identity,) for identity in identities)
+            )
+
+    def _eligible_sql(self, column: str = "id") -> str:
+        return f" AND {column} IN (SELECT id FROM retrieval_eligible)" if getattr(self, "_eligible", False) else ""
+
+    def candidate_notes(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM notes WHERE 1=1" + self._eligible_sql()).fetchall()
+        return [self._row(row) for row in rows]
+
     def search_exact(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
         q = query.strip().lower()
         if not q:
             return []
         rows = self.connection.execute(
-            "SELECT * FROM notes WHERE LOWER(id)=? OR LOWER(declared_id)=? OR LOWER(path)=? OR LOWER(title)=? "
-            "OR LOWER(path) LIKE ? ORDER BY LENGTH(path),path LIMIT ?",
+            "SELECT * FROM notes WHERE (LOWER(id)=? OR LOWER(declared_id)=? OR LOWER(path)=? OR LOWER(title)=? "
+            "OR LOWER(path) LIKE ?)" + self._eligible_sql() + " ORDER BY LENGTH(path),path LIMIT ?",
             (q, q, q, q, f"%{q}%", limit),
         ).fetchall()
         result = [self._row(row) for row in rows]
@@ -409,8 +446,10 @@ class KnowledgeIndex:
             fts_query = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in query_terms[:32])
             try:
                 matches = self.connection.execute(
-                    "SELECT note_id,bm25(notes_fts,3.0,2.6,2.3,1.7,1.0,0.7) AS bm25_rank "
-                    "FROM notes_fts WHERE notes_fts MATCH ? ORDER BY bm25_rank LIMIT ?",
+                    "SELECT note_id,bm25(notes_fts,0.0,3.0,2.6,2.3,1.7,1.0,0.7) AS bm25_rank "
+                    "FROM notes_fts WHERE notes_fts MATCH ?"
+                    + self._eligible_sql("note_id")
+                    + " ORDER BY bm25_rank LIMIT ?",
                     (fts_query, limit),
                 ).fetchall()
             except sqlite3.OperationalError:
@@ -433,7 +472,9 @@ class KnowledgeIndex:
                 return result
         clauses = " OR ".join("LOWER(title || ' ' || summary || ' ' || l2 || ' ' || path) LIKE ?" for _ in query_terms)
         params = tuple(f"%{term.lower()}%" for term in query_terms) + (limit,)
-        rows = self.connection.execute(f"SELECT * FROM notes WHERE {clauses} LIMIT ?", params).fetchall()
+        rows = self.connection.execute(
+            f"SELECT * FROM notes WHERE ({clauses})" + self._eligible_sql() + " LIMIT ?", params
+        ).fetchall()
         result = [self._row(row) for row in rows]
         for item in result:
             haystack = f"{item['title']} {item['summary']} {item['l2']} {item['path']}".lower()
@@ -453,12 +494,16 @@ class KnowledgeIndex:
             return []
         placeholders = ",".join("?" for _ in memory_ids)
         rows = self.connection.execute(
-            f"SELECT source_id,target,target_id,relation FROM links WHERE source_id IN ({placeholders}) LIMIT ?",
+            f"SELECT source_id,target,target_id,relation FROM links WHERE source_id IN ({placeholders})"
+            + self._eligible_sql("target_id")
+            + " LIMIT ?",
             (*memory_ids, limit),
         ).fetchall()
         if reverse:
             rows += self.connection.execute(
-                f"SELECT source_id,target,target_id,relation FROM links WHERE target_id IN ({placeholders}) LIMIT ?",
+                f"SELECT source_id,target,target_id,relation FROM links WHERE target_id IN ({placeholders})"
+                + self._eligible_sql("source_id")
+                + " LIMIT ?",
                 (*memory_ids, limit),
             ).fetchall()
         result: list[dict[str, Any]] = []

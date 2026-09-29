@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .config import KBConfig
-from .util import atomic_write, sha256_text, utc_now
+from .security import reject_secrets
+from .storage import vault_lock
+from .util import atomic_write, sha256_text, stable_json, utc_now
 
 VALID_OPERATIONS = {
     "ADD",
@@ -52,6 +55,7 @@ class MemoryOperation:
     new_digest: str = ""
     reason: str = ""
     policy_version: str = "v2"
+    sequence: int = 0
     confidence_before: float | None = None
     confidence_after: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -77,7 +81,18 @@ class EvidenceStore:
         producer: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> EvidenceRecord:
-        digest = sha256_text(content)
+        reject_secrets([content, metadata, subject, path, producer, repository_id])
+        envelope = {
+            "kind": kind,
+            "subject": subject,
+            "repository_id": repository_id,
+            "commit": commit,
+            "path": path,
+            "content_digest": sha256_text(content),
+            "producer": producer,
+            "metadata": metadata or {},
+        }
+        digest = sha256_text(stable_json(envelope))
         evidence_id = f"evidence:sha256:{digest}"
         record = EvidenceRecord(
             evidence_id=evidence_id,
@@ -87,7 +102,7 @@ class EvidenceStore:
             commit=commit,
             path=path,
             content=content,
-            content_digest=digest,
+            content_digest=sha256_text(content),
             observed_at=utc_now(),
             producer=producer,
             metadata=metadata or {},
@@ -98,16 +113,34 @@ class EvidenceStore:
         return record
 
     def get(self, evidence_id: str) -> EvidenceRecord | None:
+        if not re.fullmatch(r"evidence:sha256:[a-f0-9]{64}", evidence_id):
+            return None
         digest = evidence_id.rsplit(":", 1)[-1]
         path = self.config.evidence_dir / digest[:2] / f"{digest}.json"
-        if not path.exists():
+        if (
+            not path.exists()
+            or path.is_symlink()
+            or not path.resolve().is_relative_to(self.config.evidence_dir.resolve())
+        ):
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             record = EvidenceRecord(**data)
         except (ValueError, TypeError, json.JSONDecodeError):
             return None
-        if record.content_digest != sha256_text(record.content):
+        if record.evidence_id != evidence_id or record.content_digest != sha256_text(record.content):
+            return None
+        envelope = {
+            "kind": record.kind,
+            "subject": record.subject,
+            "repository_id": record.repository_id,
+            "commit": record.commit,
+            "path": record.path,
+            "content_digest": record.content_digest,
+            "producer": record.producer,
+            "metadata": record.metadata,
+        }
+        if digest != sha256_text(stable_json(envelope)):
             return None
         return record
 
@@ -119,8 +152,9 @@ class EvidenceStore:
         for path in self.config.evidence_dir.rglob("*.json"):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                if data.get("evidence_id"):
-                    result.append(str(data["evidence_id"]))
+                identity = str(data.get("evidence_id", ""))
+                if self.verify(identity):
+                    result.append(identity)
             except (OSError, json.JSONDecodeError):
                 continue
         return sorted(result)
@@ -131,7 +165,11 @@ class OperationLedger:
         self.config = config
         self.config.ensure_runtime()
 
-    def append(
+    def append(self, operation: str, memory_id: str, **kwargs: Any) -> MemoryOperation:
+        with vault_lock(self.config.vault):
+            return self._append_locked(operation, memory_id, **kwargs)
+
+    def _append_locked(
         self,
         operation: str,
         memory_id: str,
@@ -158,6 +196,7 @@ class OperationLedger:
             )
         record = MemoryOperation(
             operation_id=f"op:{uuid.uuid4().hex}",
+            sequence=(last.sequence + 1) if last else 1,
             operation=operation,
             memory_id=memory_id,
             actor=actor,
@@ -171,6 +210,7 @@ class OperationLedger:
             confidence_after=confidence_after,
             metadata=metadata or {},
         )
+        reject_secrets(record.to_dict())
         day = record.observed_at[:10]
         destination = (
             self.config.operation_dir / day / f"{record.observed_at.replace(':', '')}-{record.operation_id[3:]}.json"
@@ -187,7 +227,7 @@ class OperationLedger:
                 continue
             if memory_id is None or value.memory_id == memory_id:
                 result.append(value)
-        return result
+        return sorted(result, key=lambda item: (item.sequence, item.observed_at, item.operation_id))
 
     def last_for(self, memory_id: str) -> MemoryOperation | None:
         values = self.iter_operations(memory_id)

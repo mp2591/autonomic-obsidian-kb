@@ -70,7 +70,7 @@ def flatten_strings(value: Any) -> set[str]:
         for key, item in value.items():
             strings.add(str(key))
             strings.update(flatten_strings(item))
-    elif isinstance(value, (list, tuple, set)):
+    elif isinstance(value, list | tuple | set):
         for item in value:
             strings.update(flatten_strings(item))
     elif value is not None:

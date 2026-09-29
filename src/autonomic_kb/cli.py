@@ -33,6 +33,9 @@ from .validation import Validator
 
 
 def _emit(value: Any, json_output: bool = False) -> None:
+    if json_output and hasattr(value, "to_agent_dict"):
+        print(json.dumps(value.to_agent_dict(), separators=(",", ":"), sort_keys=True, ensure_ascii=False))
+        return
     if json_output:
         if hasattr(value, "to_dict"):
             value = value.to_dict()
@@ -75,6 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--depth", choices=["auto", "0", "1", "2", "3"], default="auto")
     retrieve.add_argument("--path", action="append", default=[], dest="paths")
     retrieve.add_argument("--session", default="")
+    retrieve.add_argument("--epoch", default="")
+    retrieve.add_argument("--at", default="")
+    retrieve.add_argument("--version", action="append", default=[], dest="versions", metavar="PACKAGE=VERSION")
     retrieve.add_argument("--include-uncertain", action="store_true")
     retrieve.add_argument("--route")
     retrieve.add_argument("--explain-exclusions", action="store_true")
@@ -93,8 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         ("--valid-from", {"default": ""}),
         ("--valid-to", {"default": ""}),
         ("--version-range", {"default": ""}),
+        ("--version-package", {"default": ""}),
+        ("--verification", {"default": ""}),
     ]:
         remember.add_argument(name, **kwargs)
+    remember.add_argument("--precondition", action="append", default=[], dest="preconditions")
     remember.add_argument("--confidence", type=float, default=0.7)
     remember.add_argument("--applies-to", action="append", default=[])
     remember.add_argument("--source", action="append", default=[])
@@ -115,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     episode.add_argument("--success-action", action="append", default=[])
     episode.add_argument("--outcome", default="unknown")
     episode.add_argument("--correction", default="")
+    episode.add_argument("--precondition", action="append", default=[], dest="preconditions")
+    episode.add_argument("--verification", default="")
+    episode.add_argument("--evidence", action="append", default=[])
     consolidate = commands.add_parser("consolidate")
     consolidate.add_argument("episode_id")
     consolidate.add_argument("--force", action="store_true")
@@ -152,6 +164,19 @@ def build_parser() -> argparse.ArgumentParser:
     obsidian = commands.add_parser("obsidian")
     obsidian.add_argument("--capabilities", action="store_true")
     commands.add_parser("mcp")
+    calibrate = commands.add_parser("calibrate")
+    calibrate.add_argument("--promote", action="store_true")
+    acknowledge = commands.add_parser("ack")
+    acknowledge.add_argument("retrieval_id")
+    acknowledge.add_argument("--session", required=True)
+    acknowledge.add_argument("--epoch", required=True)
+    receipt = commands.add_parser("receipt-check")
+    receipt.add_argument("retrieval_id")
+    for target in (acknowledge, receipt):
+        target.add_argument("--version", action="append", default=[], dest="versions", metavar="PACKAGE=VERSION")
+    replay = commands.add_parser("replay")
+    replay.add_argument("--spec", required=True)
+    replay.add_argument("--allow-execution", action="store_true")
 
     evidence = commands.add_parser("evidence")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -171,10 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--notes", default="")
     outcome = commands.add_parser("outcome")
     outcome.add_argument("--task", required=True)
+    outcome.add_argument("--pair-id", default="")
     outcome.add_argument("--mode", choices=["kb", "no-kb"], required=True)
     outcome.add_argument("--success", action="store_true")
-    outcome.add_argument("--input-tokens", type=int, default=0)
-    outcome.add_argument("--output-tokens", type=int, default=0)
+    outcome.add_argument("--input-tokens", type=int)
+    outcome.add_argument("--output-tokens", type=int)
     outcome.add_argument("--cached-tokens", type=int, default=0)
     outcome.add_argument("--searches", type=int, default=0)
     outcome.add_argument("--file-reads", type=int, default=0)
@@ -223,6 +249,16 @@ def _normalize_global_options(argv: list[str]) -> list[str]:
     return front + rest
 
 
+def _versions(values: list[str]) -> dict[str, str]:
+    result = {}
+    for value in values:
+        name, separator, version = value.partition("=")
+        if not separator or not name or not version:
+            raise ValueError("version context must be PACKAGE=VERSION")
+        result[name] = version
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(_normalize_global_options(list(sys.argv[1:] if argv is None else argv)))
@@ -268,6 +304,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.session,
                     args.include_uncertain,
                     args.route,
+                    epoch=args.epoch,
+                    at=args.at,
+                    versions=_versions(args.versions),
                 )
             finally:
                 r.close()
@@ -298,6 +337,9 @@ def main(argv: list[str] | None = None) -> int:
                 valid_from=args.valid_from,
                 valid_to=args.valid_to,
                 version_range=args.version_range,
+                version_package=args.version_package,
+                preconditions=args.preconditions,
+                verification=args.verification,
             )
             learner = Learner(config)
             try:
@@ -326,6 +368,9 @@ def main(argv: list[str] | None = None) -> int:
                     successful_actions=args.success_action,
                     outcome=args.outcome,
                     correction=args.correction,
+                    preconditions=args.preconditions,
+                    verification=args.verification,
+                    evidence=args.evidence,
                 )
             finally:
                 learner.close()
@@ -480,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
                     maintenance_tokens=args.maintenance_tokens,
                     unsafe=args.unsafe,
                     retrieved_ids=args.retrieved,
+                    pair_id=args.pair_id,
+                    usage_complete=args.input_tokens is not None and args.output_tokens is not None,
                 )
             )
             _emit(result, args.json)
@@ -492,6 +539,29 @@ def main(argv: list[str] | None = None) -> int:
                 else {"released": store.release(args.task, args.agent)}
             )
             _emit(result, args.json)
+            return 0
+        if args.command == "calibrate":
+            from .calibration import train_rank_policy
+
+            with KnowledgeIndex(config) as index:
+                _emit(train_rank_policy(config, index, promote=args.promote), args.json)
+            return 0
+        if args.command in {"ack", "receipt-check"}:
+            from .mcp_server import MCPServer
+
+            arguments = {"retrieval_id": args.retrieval_id, "versions": _versions(args.versions)}
+            name = "kb_receipt_check"
+            if args.command == "ack":
+                arguments.update(session=args.session, epoch=args.epoch)
+                name = "kb_context_ack"
+            _emit(MCPServer(config).call_tool(name, arguments), args.json)
+            return 0
+        if args.command == "replay":
+            from .replay import MatchedReplayHarness
+
+            if not args.allow_execution:
+                raise ValueError("replay runs trusted host commands; pass --allow-execution explicitly")
+            _emit(MatchedReplayHarness(config).run(args.spec), args.json)
             return 0
         if args.command == "migrate":
             _emit(migrate_vault(config, args.apply), args.json)

@@ -29,3 +29,9 @@ build/
 .ci-cache/
 ci/obsidian/Obsidian.AppImage
 test-artifacts/
+
+# Context receipts and synchronization state are local and disposable.
+**/.kb/
+**/.kb-writer.lock
+**/.kb-transactions/
+# .kb-feedback.jsonl and .kb-outcomes.jsonl are durable; review before syncing.

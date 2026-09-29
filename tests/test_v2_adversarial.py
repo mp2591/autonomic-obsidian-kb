@@ -157,7 +157,7 @@ class AdversarialV2Tests(unittest.TestCase):
                 validator.close()
             codes = {issue.code for issue in report.issues}
             self.assertIn("validator-path-escape", codes)
-            self.assertIn("validator-shell-syntax", codes)
+            self.assertIn("validator-execution-disabled", codes)
 
     def test_memory_flood_does_not_bypass_trust_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

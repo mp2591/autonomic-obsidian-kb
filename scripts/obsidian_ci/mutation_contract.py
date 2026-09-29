@@ -138,11 +138,12 @@ Links to [[Mutable]].
         return result.returncode == 0 and "generated/kb-created.md" in clean(result.stdout)
 
     wait_for("Obsidian to index a KB-created filesystem note", obsidian_sees_kb_note, timeout=45.0)
-    assert_output_contains(
-        cli.run("property:read", "name=id", "path=generated/kb-created.md"),
-        "kb:repository:fact:kb-created",
-        "Obsidian read of KB-created frontmatter",
-    )
+
+    def obsidian_sees_kb_metadata() -> bool:
+        result = cli.run("property:read", "name=id", "path=generated/kb-created.md", check=False)
+        return result.returncode == 0 and "kb:repository:fact:kb-created" in clean(result.stdout)
+
+    wait_for("Obsidian metadata for KB-created note", obsidian_sees_kb_metadata, timeout=45.0)
     report.add("bidirectional-vault-interoperability", "Obsidian observed a KB-created note")
 
     with KnowledgeIndex(config) as index:

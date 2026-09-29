@@ -27,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       procps \
       python3 \
       python3-jsonschema \
+      python3-packaging \
       python3-yaml \
       tini \
       xdg-utils \
