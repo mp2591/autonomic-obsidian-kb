@@ -21,7 +21,9 @@ from autonomic_kb.graph import render_graph
 from autonomic_kb.healing import Compactor, Healer, forget
 from autonomic_kb.index import KnowledgeIndex
 from autonomic_kb.learning import Learner, LearningCandidate
+from autonomic_kb.leases import LeaseStore
 from autonomic_kb.lifecycle import Lifecycle
+from autonomic_kb.markdown import parse_markdown
 from autonomic_kb.mcp_server import MCPServer
 from autonomic_kb.observability import EventLog
 from autonomic_kb.semantic import LocalEmbeddingBackend
@@ -72,7 +74,8 @@ class SelfPromotionTests(unittest.TestCase):
     def test_imported_validators_cannot_pad_the_score(self):
         permissive = make_vault(Path(self.temporary.name) / "padded")
         values = {"title": "Padded", "summary": "Unevidenced claim.", "validators": [{}, {}, {}]}
-        self.assertEqual(LearningCandidate.from_dict(values).validators, [])
+        plain = LearningCandidate.from_dict({"title": "Padded", "summary": "Unevidenced claim."})
+        self.assertEqual(LearningCandidate.from_dict(values).score(), plain.score())
         source = Path(self.temporary.name) / "padded.json"
         source.write_text(json.dumps(values))
         learner = Learner(permissive)
@@ -82,6 +85,19 @@ class SelfPromotionTests(unittest.TestCase):
             learner.close()
         with self.assertRaisesRegex(ValueError, "schema"):
             MCPServer(permissive).call_tool("kb_remember", values)
+
+    def test_imported_validators_are_kept_on_the_note(self):
+        permissive = make_vault(Path(self.temporary.name) / "checked")
+        validator = {"kind": "file-exists", "path": "src/app.py"}
+        values = {"title": "App entry", "summary": "The entry point is src/app.py.", "validators": [validator]}
+        source = Path(self.temporary.name) / "checked.json"
+        source.write_text(json.dumps(values))
+        learner = Learner(permissive)
+        try:
+            path = permissive.vault / learner.learn_json(source)[0]["path"]
+        finally:
+            learner.close()
+        self.assertEqual(parse_markdown(path.read_text()).metadata["validators"], [validator])
 
     def test_evidence_padding_cannot_promote_when_review_is_required(self):
         store = EvidenceStore(self.config)
@@ -255,7 +271,7 @@ class MinorIssueTests(unittest.TestCase):
         self.assertTrue((self.root / "events.jsonl.1").exists())
         self.assertEqual([row["number"] for row in log.tail(3)], [397, 398, 399])
 
-    def test_local_backups_and_rolled_back_files_expire(self):
+    def test_local_backups_expire_but_rolled_back_files_are_kept(self):
         old = self.config.runtime_dir / "backups" / "20200101T000000Z" / "old.md"
         stale = self.config.runtime_dir / "rolled-back" / "deadbeef" / "old.md"
         for path in (old, stale):
@@ -267,7 +283,8 @@ class MinorIssueTests(unittest.TestCase):
             atomic_write(self.config.vault / "fresh.md", "created during a failed transaction\n")
             raise RuntimeError("injected failure")
         self.assertFalse(old.parent.exists())
-        self.assertFalse(stale.parent.exists())
+        # A set-aside file may be the only copy of a note saved during a failed transaction.
+        self.assertTrue(stale.exists())
         self.assertTrue(list((self.config.runtime_dir / "rolled-back").rglob("fresh.md")))
 
     def test_embedding_cache_drops_deleted_notes_without_new_vectors(self):
@@ -325,6 +342,18 @@ class MinorIssueTests(unittest.TestCase):
             self.assertEqual(lease("agent-1", "acquire"), 0)
             self.assertEqual(lease("agent-2", "release"), 2)
             self.assertEqual(lease("agent-1", "release"), 0)
+        with self.assertRaisesRegex(ValueError, "distinct agent identity"):
+            MCPServer(self.config).call_tool("kb_lease_acquire", {"task": "t", "agent": "generic"})
+
+    def test_lease_taken_under_the_shared_identity_before_upgrading_can_be_released(self):
+        store = LeaseStore(self.config)
+        legacy = store.acquire("old task", "agent-1").to_dict() | {"agent": "generic"}
+        atomic_write(self.config.lease_dir / f"{legacy['task_signature']}.json", json.dumps(legacy))
+        command = ["--vault", str(self.config.vault), "lease", "release", "old task"]
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()), patch.dict(os.environ):
+            os.environ.pop("KB_AGENT", None)
+            self.assertEqual(main(command), 0)
+        self.assertIsNone(store.find("old task"))
 
     def test_exact_path_search_treats_wildcards_literally(self):
         write_memory(self.config, "notes/test_cli.md", "under", "Under", "underscore note")

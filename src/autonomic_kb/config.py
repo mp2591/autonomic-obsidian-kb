@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Agent identity when neither --agent nor KB_AGENT is given; every such caller shares it.
+DEFAULT_AGENT = "generic"
+
 DEFAULT_CONFIG = """# autonomic-obsidian-kb configuration
 
 [retrieval]

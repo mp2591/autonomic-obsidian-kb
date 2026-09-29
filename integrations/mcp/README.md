@@ -17,6 +17,6 @@ Example generic client configuration:
 
 The server is local stdio, not a network listener. The repository is fixed when the server starts, so pass `--repo` (or set `KB_REPO`) for the project it serves.
 
-Writes still pass promotion and security gates. `kb_remember` cannot assign authority, taint, or value estimates; a candidate without enough evidence lands in the inbox and is not retrieved until a reviewer promotes it with the CLI. Review operations (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`) are deliberately not MCP tools.
+Writes still pass promotion and security gates. `kb_remember` cannot assign authority, taint, value estimates, or validators; a candidate without enough evidence (or every candidate, when the vault sets `[security] allow_privileged_remember = false`) lands in the inbox and is not retrieved until a reviewer promotes it with the CLI. `kb_lease_acquire` needs a distinct `agent`; `generic` is refused. Review operations (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`) are deliberately not MCP tools.
 
 A tool that fails returns a normal result with `isError: true` and the message as text, so the model can correct its call. Unknown tools and malformed requests return JSON-RPC errors. Client configuration formats differ by agent version; use the current agent documentation for the surrounding config file.

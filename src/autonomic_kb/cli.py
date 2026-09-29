@@ -13,7 +13,7 @@ from typing import Any
 
 from . import __version__
 from .benchmark import BenchmarkRunner, TraceBenchmarkRunner, compare_to_reference
-from .config import KBConfig, initialize_vault, missing_local_ignores
+from .config import DEFAULT_AGENT, KBConfig, initialize_vault, missing_local_ignores
 from .dashboard import dashboard_data
 from .evidence import EvidenceStore
 from .git_context import inspect_git
@@ -35,8 +35,6 @@ from .storage import pending_transactions, resolve_transaction
 from .telemetry import TaskOutcome, TelemetryStore
 from .util import sha256_text, utc_now
 from .validation import Validator
-
-DEFAULT_AGENT = "generic"
 
 
 def _emit(value: Any, json_output: bool = False) -> None:
@@ -630,8 +628,6 @@ def main(argv: list[str] | None = None) -> int:
             _emit(result, args.json)
             return 0
         if args.command == "lease":
-            if args.agent == DEFAULT_AGENT:
-                raise ValueError("leases need a distinct agent identity; pass --agent or set KB_AGENT")
             store = LeaseStore(config)
             result = (
                 store.acquire(args.task, args.agent, ttl_minutes=args.ttl).to_dict()

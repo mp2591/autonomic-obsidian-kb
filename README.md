@@ -34,7 +34,7 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 - **Task-planned context compilation** selects whole representations and preserves commands, preconditions, and verification without unsafe sentence splicing.
 - **Temporal, version, and source gates** check declared applicability; Git ancestry alone is not continuing validity.
 - **Non-executable validation** checks schema, evidence, file existence, and source hashes. Note-defined command execution is disabled.
-- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, merge, split, migrate) snapshot notes and events as hard links. On a handled failure they restore what the KB replaced and keep external in-place edits, such as Obsidian saving a note; files created meanwhile are set aside under `.kb/rolled-back/`. Only a crashed process leaves a blocking journal, which `kb reconcile` resolves under owner control.
+- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, merge, split, migrate) snapshot notes and events as hard links. On a handled failure they restore what the KB replaced and keep external in-place edits, such as Obsidian saving a note; files created meanwhile are set aside under `.kb/rolled-back/` and kept until you remove them. Only a crashed process leaves a blocking journal, which `kb reconcile` resolves under owner control.
 - **Reviewer lifecycle** (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`, `kb merge`, `kb split`) is the explicit gate between agent-submitted candidates and retrievable knowledge; it is CLI-only, and every command requires a reason.
 - **Episodic capture and recurrence consolidation** prevent every observation from becoming canonical memory.
 - **Multi-agent leases** reduce duplicate investigations.
@@ -162,7 +162,7 @@ kb merge <target-id> <source-id>... --reason "one note instead of three overlapp
 kb split <source-id> <part-id> <part-id>... --reason "separate build and deploy procedures"
 ```
 
-Promotion, and activation of a supersede/merge/split replacement, refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` let the caller vouch for its own candidate, so each requires `--reason` and is recorded in the ledger. Promotion scores are heuristics over caller-supplied evidence (any CLI caller can add evidence, including `evaluation` evidence), and imported candidates (`kb learn --file`, MCP) cannot set their own value estimates. Set `[security] allow_privileged_remember = false` to require review for every candidate: the privileged options are refused and nothing from `remember`, `learn`, `consolidate`, or MCP activates until a reviewer runs `kb promote`. This makes review mandatory and auditable, but it does not authenticate the reviewer: `kb promote` and the other reviewer commands are ordinary CLI commands and the ledger actor is the self-declared `--agent`. To control who reviews, give agents MCP-only access (no shell).
+Promotion, and activation of a supersede/merge/split replacement, refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` let the caller vouch for its own candidate, so each requires `--reason` and is recorded in the ledger. Promotion scores are heuristics over caller-supplied evidence (any CLI caller can add evidence, including `evaluation` evidence), and imported candidates (`kb learn --file`, MCP) cannot set their own value estimates; their validators are kept and checked but earn no promotion credit. Set `[security] allow_privileged_remember = false` to require review for every candidate: the privileged options are refused and nothing from `remember`, `learn`, `consolidate`, or MCP activates until a reviewer runs `kb promote`. This makes review mandatory and auditable, but it does not authenticate the reviewer: `kb promote` and the other reviewer commands are ordinary CLI commands and the ledger actor is the self-declared `--agent`. To control who reviews, give agents MCP-only access (no shell).
 
 ## Feedback and outcome learning
 
@@ -198,7 +198,7 @@ kb heal --apply     # backup + apply + post-validation + rollback on regression
 kb reconcile        # list or resolve a transaction interrupted by a crash
 ```
 
-Quarantine redacts secret values (keys stay readable, private-key blocks are removed) in the vault copy; the unredacted original stays only in the local `.kb/backups/`, which the vault `.gitignore` written by `kb init` excludes. Rotate any credential that was ever committed, because Git history keeps it.
+Quarantine redacts secret values (keys stay readable, private-key blocks are removed) in the vault copy; the unredacted original stays only in the local `.kb/backups/`, which the vault `.gitignore` written by `kb init` excludes. Backup sets older than 30 days are removed when the next write starts. Rotate any credential that was ever committed, because Git history keeps it.
 
 Validator types include repository-contained file existence and source hashes. All note-defined command validators are rejected without execution, including formerly allowlisted commands.
 
@@ -215,7 +215,7 @@ kb --agent codex-1 lease acquire "investigate index deadlock" --ttl 30
 kb --agent codex-1 lease release "investigate index deadlock"
 ```
 
-Leases are ephemeral coordination, not semantic knowledge. Each agent needs its own identity (`--agent` or `KB_AGENT`); the default `generic` identity is refused so agents cannot release each other's leases.
+Leases are ephemeral coordination, not semantic knowledge. Each agent needs its own identity (`--agent` or `KB_AGENT`); acquiring under the default `generic` identity is refused so agents cannot release each other's leases. A lease taken under `generic` before this check can still be released without `--agent`.
 
 ## Retrieval experiments
 

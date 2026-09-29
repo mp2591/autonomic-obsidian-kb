@@ -72,9 +72,10 @@ def vault_lock(vault: Path):
 
 
 EXCLUDED_DIRECTORIES = {"__pycache__", "node_modules"}
-# Heal backups and rolled-back files keep unredacted originals; they are local recovery
-# copies, not an archive, so they expire.
-LOCAL_COPY_DIRECTORIES = (".kb/backups", ".kb/rolled-back")
+# Heal backups keep unredacted originals; they are local recovery copies, not an archive,
+# so they expire. Files under .kb/rolled-back/ are never pruned: one may be the only copy
+# of a note someone saved while a transaction failed.
+LOCAL_COPY_DIRECTORIES = (".kb/backups",)
 LOCAL_COPY_RETENTION_DAYS = 30
 LEDGER_DIRECTORY = ".kb-memory-events"
 JOURNAL_DIRECTORY = ".kb-transactions"
@@ -389,7 +390,7 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
 
 
 def prune_local_copies(vault: Path, retention_days: int = LOCAL_COPY_RETENTION_DAYS) -> list[str]:
-    """Remove backup and rolled-back sets older than ``retention_days``; return what was removed."""
+    """Remove heal backup sets older than ``retention_days``; return what was removed."""
     cutoff = time.time() - retention_days * 86400
     removed = []
     for relative in LOCAL_COPY_DIRECTORIES:

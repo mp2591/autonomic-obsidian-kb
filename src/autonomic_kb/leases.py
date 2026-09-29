@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .config import KBConfig
+from .config import DEFAULT_AGENT, KBConfig
 from .security import reject_secrets
 from .storage import vault_lock
 from .util import atomic_write, parse_time, sha256_text
@@ -33,6 +33,10 @@ class LeaseStore:
         config.ensure_runtime()
 
     def acquire(self, task: str, agent: str, scope: str = "repository", ttl_minutes: int = 30) -> TaskLease:
+        # A shared identity would let any agent release any lease. Releasing under it stays
+        # allowed so leases taken before this check can still be released.
+        if not agent.strip() or agent == DEFAULT_AGENT:
+            raise ValueError("leases need a distinct agent identity; pass --agent or set KB_AGENT")
         reject_secrets([task, agent])
         with vault_lock(self.config.vault):
             return self._acquire(task, agent, scope, ttl_minutes)
