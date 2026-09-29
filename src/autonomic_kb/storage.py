@@ -21,7 +21,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .util import atomic_write, stable_json
@@ -192,6 +192,19 @@ def _restore(vault: Path, identity: str, snapshot: Path, files: dict[str, list[i
     return unavailable
 
 
+def _contained(root: Path, relative: Any) -> Path | None:
+    """``root / relative`` when it cannot leave ``root`` and is not a symlink; journals are untrusted input."""
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        return None
+    parts = PurePosixPath(relative).parts
+    if PurePosixPath(relative).is_absolute() or ".." in parts:
+        return None
+    candidate = root.joinpath(*parts)
+    if candidate.is_symlink() or not candidate.resolve().is_relative_to(root.resolve()):
+        return None
+    return candidate
+
+
 def _journals(vault: Path) -> list[tuple[Path, dict[str, Any]]]:
     rows = []
     for path in sorted((vault / JOURNAL_DIRECTORY).glob("*.json")):
@@ -238,8 +251,10 @@ def pending_transactions(vault: Path) -> list[dict[str, Any]]:
         if "before" in row:  # 0.3.0 journals stored the before-state inline
             before = row.get("before") or {}
             for relative, content in before.items():
-                target = vault / relative
-                if not target.exists():
+                target = _contained(vault, relative)
+                if target is None or not isinstance(content, str):
+                    files[str(relative)] = "rejected-path"
+                elif not target.exists():
                     files[relative] = "missing"
                 else:
                     same = target.read_text(encoding="utf-8") == content
@@ -249,8 +264,10 @@ def pending_transactions(vault: Path) -> list[dict[str, Any]]:
             snapshot = path.with_suffix("")
             recorded = row.get("files") or {}
             for relative in recorded:
-                saved, target = snapshot / relative, vault / relative
-                if not target.exists():
+                saved, target = _contained(snapshot, relative), _contained(vault, relative)
+                if saved is None or target is None:
+                    files[str(relative)] = "rejected-path"
+                elif not target.exists():
                     files[relative] = "missing" if saved.exists() else "missing-unavailable"
                 elif not saved.exists():
                     files[relative] = "unavailable"
@@ -289,6 +306,12 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
         if row.get("state") != "prepared":
             raise ValueError(f"journal {journal} is not an interrupted transaction")
         status = next(item for item in pending_transactions(vault) if item["journal"] == journal)["files"]
+        rejected = sorted(relative for relative, state in status.items() if state == "rejected-path")
+        if rejected:
+            raise ValueError(
+                f"journal {journal} records paths outside the vault or its snapshot ({', '.join(rejected)}); "
+                "nothing was changed; inspect the journal manually"
+            )
         restored: list[str] = []
         unavailable: list[str] = []
         new = sorted(relative for relative, state in status.items() if state == "new")

@@ -87,10 +87,15 @@ class Retriever:
         repo_name = Path(git.root).name if git.root else (self.config.repo.name if self.config.repo else "")
         paths = requested_paths or []
         module = Path(paths[0]).parts[0] if paths and Path(paths[0]).parts else ""
-        # Uncommitted changes steer ordinary retrieval; reproducible evaluation excludes them.
+        # Uncommitted changes, and symbols parsed from live files, steer ordinary retrieval;
+        # reproducible evaluation excludes both.
         changed_paths = git.changed_paths if use_worktree else []
         active_paths = paths + changed_paths
-        symbols = self.code_graph.symbols_for_paths(active_paths[:20]) if self.code_graph and active_paths else []
+        symbols = (
+            self.code_graph.symbols_for_paths(active_paths[:20])
+            if self.code_graph and active_paths and use_worktree
+            else []
+        )
         return TaskContext(
             task=task,
             cwd=str(Path.cwd()),

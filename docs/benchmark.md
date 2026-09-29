@@ -15,7 +15,7 @@ Measures expected-memory coverage, injected context, precision/false context and
 - total false context rises;
 - a case injects more than 5% more tokens.
 
-Improvements never fail the gate. The small tolerances absorb BM25 tie ordering that can differ between SQLite builds. Benchmark retrieval ignores uncommitted working-tree changes, which ordinary retrieval adds to the query, so a developer checkout and clean CI produce identical results. When a deliberate retrieval change moves the results, regenerate the reference with `python benchmarks/run.py --update-reference` in the same commit. `kb benchmark --reference <file>` applies the same comparison to other vaults and task sets.
+Improvements never fail the gate. The small tolerances absorb BM25 tie ordering that can differ between SQLite builds. Benchmark retrieval ignores uncommitted working-tree changes and code symbols parsed from live files, both of which ordinary retrieval adds to the query, so a developer checkout and clean CI produce identical results. When a deliberate retrieval change moves the results, regenerate the reference with `python benchmarks/run.py --update-reference` in the same commit. `kb benchmark --reference <file>` applies the same comparison to other vaults and task sets.
 
 ## Task-outcome layer
 

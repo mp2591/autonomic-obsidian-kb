@@ -342,6 +342,33 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(note.read_text(), "original\n")
         KnowledgeIndex(self.config).index_vault()
 
+    def test_reconcile_refuses_journal_paths_outside_the_vault(self):
+        victim = self.root / "victim.txt"
+        victim.write_text("outside the vault\n")
+        directory = self.config.vault / ".kb-transactions"
+        directory.mkdir()
+        (directory / "evil.json").write_text(
+            json.dumps({"state": "prepared", "before": {"../victim.txt": "overwritten\n", "ok.md": "fine\n"}})
+        )
+        self.assertEqual(pending_transactions(self.config.vault)[0]["files"]["../victim.txt"], "rejected-path")
+        with self.assertRaisesRegex(ValueError, "outside"):
+            resolve_transaction(self.config.vault, "evil", "restore-snapshot")
+        self.assertEqual(victim.read_text(), "outside the vault\n")
+        self.assertFalse((self.config.vault / "ok.md").exists())
+
+    def test_reconcile_refuses_snapshot_symlinks(self):
+        note = write_memory(self.config, "note.md", "note", "Note", "before the crash")
+        self._crash_inside_transaction(note, "after\n")
+        journal = pending_transactions(self.config.vault)[0]["journal"]
+        secret = self.root / "secret.txt"
+        secret.write_text("external content\n")
+        saved = self.config.vault / ".kb-transactions" / journal / "note.md"
+        saved.unlink()
+        saved.symlink_to(secret)
+        with self.assertRaisesRegex(ValueError, "outside"):
+            resolve_transaction(self.config.vault, journal, "restore-snapshot")
+        self.assertEqual(note.read_text(), "after\n")
+
     def test_committed_transactions_leave_no_journal_or_snapshot(self):
         write_memory(self.config, "a.md", "a", "A", "alpha")
         with semantic_transaction(self.config.vault):
@@ -730,22 +757,24 @@ class InterfaceTests(unittest.TestCase):
         identity = "kb:repository:command:t"
         write_memory(self.config, "cmd.md", identity, "Test", "run the unit tests", memory_type="command")
         tasks = Path(self.temporary.name) / "tasks.json"
-        tasks.write_text(json.dumps([{"name": "t", "task": "run the unit tests", "expected_ids": [identity]}]))
+        case = {"name": "t", "task": "run the unit tests", "paths": ["src/app.py"], "expected_ids": [identity]}
+        tasks.write_text(json.dumps([case]))
         dirty = GitContext(root="/tmp/demo", changed_paths=["src/uncommitted.py"])
-        seen: list[list[str]] = []
+        seen: list[tuple[list[str], list[str]]] = []
         original = Retriever.build_context
 
         def spy(retriever, *args, **kwargs):
             context = original(retriever, *args, **kwargs)
-            seen.append(list(context.changed_paths))
+            seen.append((list(context.changed_paths), list(context.changed_symbols)))
             return context
 
         with (
             patch("autonomic_kb.retrieval.inspect_git", return_value=dirty),
             patch.object(Retriever, "build_context", spy),
+            patch("autonomic_kb.code_graph.RepositoryCodeGraph.symbols_for_paths", return_value=["live_rename"]),
         ):
             BenchmarkRunner(self.config).run(tasks)
-        self.assertEqual(seen, [[]])
+        self.assertEqual(seen, [([], [])])
 
     def test_benchmark_comparison_flags_regressions_not_improvements(self):
         reference = {
