@@ -524,6 +524,49 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.index.get(old["memory_id"])["status"], "superseded")
         self.assertEqual(OperationLedger(self.config).last_for(old["memory_id"]).operation, "SUPERSEDE")
 
+    def test_merge_retires_sources_into_a_reviewed_target(self):
+        first = self.learner.remember(LearningCandidate("Lint A", "ruff checks src", detail="a"), True)
+        second = self.learner.remember(LearningCandidate("Lint B", "ruff checks tests", detail="b"), True)
+        target = self.learner.remember(LearningCandidate("Lint", "ruff checks src scripts tests", detail="c"))
+        self.assertEqual(target["status"], "inbox")
+        for bad in ([target["memory_id"]], [first["memory_id"], first["memory_id"]]):
+            with self.assertRaises(ValueError):
+                self.lifecycle.merge(target["memory_id"], bad, reason="dedupe")
+        self.lifecycle.merge(target["memory_id"], [first["memory_id"], second["memory_id"]], reason="dedupe lint notes")
+        merged = self.index.get(target["memory_id"])
+        self.assertEqual(merged["status"], "active")
+        self.assertEqual(merged["metadata"]["merged_from"], sorted([first["memory_id"], second["memory_id"]]))
+        for source in (first, second):
+            note = self.index.get(source["memory_id"])
+            self.assertEqual((note["status"], note["metadata"]["merged_into"]), ("superseded", [target["memory_id"]]))
+            self.assertEqual(OperationLedger(self.config).last_for(source["memory_id"]).operation, "MERGE")
+        self.assertEqual(self.retrieve("ruff checks lint"), {target["memory_id"]})
+        with self.assertRaises(ValueError):
+            self.lifecycle.merge(target["memory_id"], [first["memory_id"]], reason="again")
+
+    def test_split_retires_an_overloaded_memory_into_parts(self):
+        source = self.learner.remember(LearningCandidate("Build and deploy", "make build then make deploy"), True)
+        build = self.learner.remember(LearningCandidate("Build", "make build compiles", memory_type="command"))
+        deploy = self.learner.remember(LearningCandidate("Deploy", "make deploy ships", memory_type="command"))
+        with self.assertRaises(ValueError):
+            self.lifecycle.split(source["memory_id"], [build["memory_id"]], reason="one part")
+        self.lifecycle.split(source["memory_id"], [build["memory_id"], deploy["memory_id"]], reason="narrower")
+        note = self.index.get(source["memory_id"])
+        self.assertEqual(note["status"], "superseded")
+        self.assertEqual(note["metadata"]["split_into"], sorted([build["memory_id"], deploy["memory_id"]]))
+        for part in (build, deploy):
+            self.assertEqual(self.index.get(part["memory_id"])["metadata"]["split_from"], [source["memory_id"]])
+        self.assertEqual(OperationLedger(self.config).last_for(source["memory_id"]).operation, "SPLIT")
+
+    def test_supersede_tolerates_a_scalar_supersedes_field(self):
+        old = self.learner.remember(LearningCandidate("Old", "old claim", detail="o"), True)
+        new = self.learner.remember(LearningCandidate("New", "new claim", detail="n"), True)
+        path = self.config.vault / new["path"]
+        path.write_text(path.read_text().replace("schema_version: 2", 'schema_version: 2\nsupersedes: "kb:earlier"', 1))
+        self.lifecycle.supersede(old["memory_id"], new["memory_id"], reason="newer claim")
+        expected = sorted(["kb:earlier", old["memory_id"]])
+        self.assertEqual(self.index.get(new["memory_id"])["metadata"]["supersedes"], expected)
+
     def test_invalid_candidate_fields_are_rejected(self):
         for candidate in (
             LearningCandidate("x", "y", memory_type="bogus"),

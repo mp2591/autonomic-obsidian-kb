@@ -149,6 +149,14 @@ def build_parser() -> argparse.ArgumentParser:
     supersede.add_argument("old_id")
     supersede.add_argument("new_id")
     supersede.add_argument("--reason", required=True)
+    merge = commands.add_parser("merge", help="reviewer: retire SOURCE memories into TARGET")
+    merge.add_argument("target_id")
+    merge.add_argument("source_ids", nargs="+")
+    merge.add_argument("--reason", required=True)
+    split = commands.add_parser("split", help="reviewer: retire SOURCE in favor of narrower PART memories")
+    split.add_argument("source_id")
+    split.add_argument("part_ids", nargs="+")
+    split.add_argument("--reason", required=True)
     reconcile = commands.add_parser("reconcile", help="inspect or resolve an interrupted transaction")
     reconcile.add_argument("journal", nargs="?", help="journal to resolve; omit to list interrupted transactions")
     reconcile_mode = reconcile.add_mutually_exclusive_group()
@@ -447,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
                 validator.close()
             _emit(report, args.json)
             return 1 if report.errors else 0
-        if args.command in {"inbox", "promote", "revalidate", "supersede"}:
+        if args.command in {"inbox", "promote", "revalidate", "supersede", "merge", "split"}:
             lifecycle = Lifecycle(config)
             actor = f"cli:{args.agent}"
             try:
@@ -457,8 +465,12 @@ def main(argv: list[str] | None = None) -> int:
                     result = lifecycle.promote(args.id, reason=args.reason, actor=actor)
                 elif args.command == "revalidate":
                     result = lifecycle.revalidate(args.id, reason=args.reason, actor=actor)
-                else:
+                elif args.command == "supersede":
                     result = lifecycle.supersede(args.old_id, args.new_id, reason=args.reason, actor=actor)
+                elif args.command == "merge":
+                    result = lifecycle.merge(args.target_id, args.source_ids, reason=args.reason, actor=actor)
+                else:
+                    result = lifecycle.split(args.source_id, args.part_ids, reason=args.reason, actor=actor)
             finally:
                 lifecycle.close()
             _emit(result, args.json)

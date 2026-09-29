@@ -26,6 +26,15 @@ REVIEWABLE = {"inbox", "conflicted"}
 RETIRED = {"archived", "superseded", "retracted", "quarantined"}
 
 
+def _merge_list(existing: Any, additions: list[str]) -> list[str]:
+    """Combine identity lists; tolerate a legacy scalar value instead of splitting it into characters."""
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+    elif not isinstance(existing, list):
+        existing = []
+    return sorted({*(str(value) for value in existing), *additions})
+
+
 def _require_reason(reason: str) -> str:
     reason = str(reason or "").strip()
     if not reason:
@@ -159,45 +168,91 @@ class Lifecycle:
 
     def supersede(self, old_id: str, new_id: str, *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         """Retire ``old_id`` in favor of ``new_id``; this is how a reviewer resolves a contradiction."""
+        old, new = self._replace([old_id], [new_id], "SUPERSEDE", reason=reason, actor=actor)
+        return {"action": "superseded", "memory_id": old[0], "superseded_by": new[0]}
+
+    def merge(self, target_id: str, source_ids: list[str], *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
+        """Retire several overlapping memories into one reviewed ``target_id``."""
+        sources, target = self._replace(source_ids, [target_id], "MERGE", reason=reason, actor=actor)
+        return {"action": "merged", "memory_id": target[0], "merged_from": sources}
+
+    def split(self, source_id: str, part_ids: list[str], *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
+        """Retire an overloaded memory in favor of narrower reviewed ``part_ids``."""
+        if len(part_ids) < 2:
+            raise ValueError("a split needs at least two parts")
+        source, parts = self._replace([source_id], part_ids, "SPLIT", reason=reason, actor=actor)
+        return {"action": "split", "memory_id": source[0], "split_into": parts}
+
+    def _replace(
+        self, retired_ids: list[str], successor_ids: list[str], operation: str, *, reason: str, actor: str
+    ) -> tuple[list[str], list[str]]:
+        """Retire memories in favor of successors in one transaction, recording provenance both ways."""
         reason = _require_reason(reason)
-        old, new = self._note(old_id), self._note(new_id)
-        if old["id"] == new["id"]:
-            raise ValueError("a memory cannot supersede itself")
-        if old["status"] in RETIRED:
-            raise ValueError(f"{old_id} is already {old['status']}")
-        if new["status"] in RETIRED or new["status"] == "stale":
-            raise ValueError(f"replacement {new_id} is {new['status']}; revalidate or choose an active memory")
-        if new["status"] in REVIEWABLE:
-            self._raise_blockers(new)
-        old_identity = old["declared_id"] or old["id"]
-        new_identity = new["declared_id"] or new["id"]
+        if not retired_ids or not successor_ids:
+            raise ValueError("both retired and replacement memories are required")
+        retired = [self._note(identity) for identity in retired_ids]
+        successors = [self._note(identity) for identity in successor_ids]
+        rows = [note["id"] for note in retired + successors]
+        if len(set(rows)) != len(rows):
+            raise ValueError("a memory can appear only once and cannot replace itself")
+        for note in retired:
+            if note["status"] in RETIRED:
+                raise ValueError(f"{note['declared_id'] or note['id']} is already {note['status']}")
+        for note in successors:
+            if note["status"] in RETIRED or note["status"] == "stale":
+                raise ValueError(
+                    f"replacement {note['declared_id'] or note['id']} is {note['status']}; "
+                    "revalidate or choose an active memory"
+                )
+            if note["status"] in REVIEWABLE:
+                self._raise_blockers(note)
+        retired_identities = [note["declared_id"] or note["id"] for note in retired]
+        successor_identities = [note["declared_id"] or note["id"] for note in successors]
+        forward, backward = {
+            "SUPERSEDE": ("superseded_by", "supersedes"),
+            "MERGE": ("merged_into", "merged_from"),
+            "SPLIT": ("split_into", "split_from"),
+        }[operation]
 
         def retire(data: dict[str, Any]) -> None:
             data["status"] = "superseded"
-            data["superseded_by"] = new_identity
+            if len(successor_identities) == 1:
+                data["superseded_by"] = successor_identities[0]
+            if forward != "superseded_by":
+                data[forward] = _merge_list(data.get(forward), successor_identities)
 
         with semantic_transaction(self.config.vault):
-            _, before, after = self._rewrite(old, retire)
-            self.operations.append(
-                "SUPERSEDE",
-                old_identity,
-                actor=actor,
-                basis=[new_identity],
-                previous_digest=sha256_text(before),
-                new_digest=sha256_text(after),
-                reason=reason,
-            )
-            self._activate(new, reason=f"supersedes {old_identity}: {reason}", actor=actor, supersedes=old_identity)
+            for note, identity in zip(retired, retired_identities, strict=True):
+                _, before, after = self._rewrite(note, retire)
+                self.operations.append(
+                    operation,
+                    identity,
+                    actor=actor,
+                    basis=successor_identities,
+                    previous_digest=sha256_text(before),
+                    new_digest=sha256_text(after),
+                    reason=reason,
+                )
+            for note in successors:
+                self._activate(
+                    note,
+                    reason=f"{operation.lower()} of {', '.join(retired_identities)}: {reason}",
+                    actor=actor,
+                    provenance=(backward, retired_identities),
+                )
         self.index.index_vault()
-        return {"action": "superseded", "memory_id": old_identity, "superseded_by": new_identity}
+        return retired_identities, successor_identities
 
-    def _activate(self, note: dict[str, Any], *, reason: str, actor: str, supersedes: str = "") -> Path:
+    def _activate(
+        self, note: dict[str, Any], *, reason: str, actor: str, provenance: tuple[str, list[str]] | None = None
+    ) -> Path:
         previous = note["status"]
 
         def mutate(data: dict[str, Any]) -> None:
             data["status"] = "active"
-            if supersedes:
-                data["supersedes"] = sorted({*data.get("supersedes", []), supersedes})
+            if provenance:
+                field, identities = provenance
+                data[field] = _merge_list(data.get(field), identities)
 
         move_to = Learner.directory_for_type(str(note.get("type", "fact"))) if previous in REVIEWABLE else None
         path, before, after = self._rewrite(note, mutate, move_to=move_to)
