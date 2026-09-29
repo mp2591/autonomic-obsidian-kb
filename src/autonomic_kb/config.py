@@ -25,6 +25,9 @@ recurrence_threshold = 2
 allow_untrusted = false
 allow_cross_repo = false
 require_instruction_authorization = true
+# CLI `remember --force` / elevated --authority or --taint / --authorize-instruction
+# (each needs --reason and is recorded in the ledger). Set false to require review.
+allow_privileged_remember = true
 
 [paths]
 inbox = "00-inbox"
@@ -52,6 +55,7 @@ class KBConfig:
     allow_untrusted: bool = False
     allow_cross_repo: bool = False
     require_instruction_authorization: bool = True
+    allow_privileged_remember: bool = True
     inbox_dir: str = "00-inbox"
     archive_dir: str = "99-archive"
     quarantine_dir: str = "98-quarantine"
@@ -162,6 +166,7 @@ class KBConfig:
             allow_untrusted=bool(security.get("allow_untrusted", False)),
             allow_cross_repo=bool(security.get("allow_cross_repo", False)),
             require_instruction_authorization=bool(security.get("require_instruction_authorization", True)),
+            allow_privileged_remember=bool(security.get("allow_privileged_remember", True)),
             inbox_dir=str(paths.get("inbox", "00-inbox")),
             archive_dir=str(paths.get("archive", "99-archive")),
             quarantine_dir=str(paths.get("quarantine", "98-quarantine")),

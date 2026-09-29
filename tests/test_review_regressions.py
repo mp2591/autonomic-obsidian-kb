@@ -534,6 +534,34 @@ class LifecycleTests(unittest.TestCase):
                 self.learner.remember(candidate, True)
         self.assertEqual(list(self.config.vault.rglob("*.md")), [])
 
+    def _cli_remember(self, *extra: str) -> tuple[int, dict]:
+        output = io.StringIO()
+        base = ["--json", "--vault", str(self.config.vault), "--repo", str(self.repo), "--agent", "tester"]
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            arguments = ["remember", "--title", "Deploy rule", "--summary", "Deploys need a green CI run.", *extra]
+            code = main([*base, *arguments])
+        return code, json.loads(output.getvalue() or "{}")
+
+    def test_privileged_remember_options_need_a_reason_and_are_recorded(self):
+        self.assertEqual(self._cli_remember("--force")[0], 2)
+        self.assertEqual(self._cli_remember("--authority", "source-of-truth")[0], 2)
+        self.assertEqual(list(self.config.vault.rglob("*.md")), [])
+        code, result = self._cli_remember("--force", "--reason", "maintainer confirmed in review")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["review"]["actor"], "cli:tester")
+        operation = OperationLedger(self.config).last_for(result["memory_id"])
+        self.assertEqual(operation.metadata["review"]["reason"], "maintainer confirmed in review")
+
+    def test_privileged_remember_can_be_disabled(self):
+        path = self.config.vault / "kb.toml"
+        switch = "allow_cross_repo=false\nallow_privileged_remember=false"
+        path.write_text(path.read_text().replace("allow_cross_repo=false", switch))
+        self.assertEqual(self._cli_remember("--force", "--reason", "trying anyway")[0], 2)
+        code, result = self._cli_remember()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "inbox")
+
     def test_cli_rejects_invalid_type_before_writing(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             main(["--vault", str(self.config.vault), "remember", "--title", "x", "--summary", "y", "--type", "bogus"])

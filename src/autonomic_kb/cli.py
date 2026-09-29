@@ -114,7 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
     remember.add_argument("--source", action="append", default=[])
     remember.add_argument("--evidence", action="append", default=[])
     remember.add_argument("--authorize-instruction", action="store_true")
-    remember.add_argument("--force", action="store_true")
+    remember.add_argument("--force", action="store_true", help="activate without review (requires --reason)")
+    remember.add_argument("--reason", default="", help="required with --force or elevated trust options")
 
     learn = commands.add_parser("learn")
     group = learn.add_mutually_exclusive_group(required=True)
@@ -273,6 +274,33 @@ def _normalize_global_options(argv: list[str]) -> list[str]:
     return front + rest
 
 
+def _privileged_review(args: argparse.Namespace, config: KBConfig) -> dict[str, Any] | None:
+    """Options that let a caller vouch for its own candidate need a reason and leave a ledger record.
+
+    MCP cannot set them at all; `[security] allow_privileged_remember = false` removes them
+    from the CLI too, so every candidate must pass reviewer promotion.
+    """
+    options = []
+    if args.force:
+        options.append("--force")
+    if AUTHORITY.get(args.authority, 0.0) > AUTHORITY["agent"]:
+        options.append(f"--authority {args.authority}")
+    if TAINT_ORDER.get(args.taint, 2) < TAINT_ORDER["agent"]:
+        options.append(f"--taint {args.taint}")
+    if args.authorize_instruction:
+        options.append("--authorize-instruction")
+    if not options:
+        return None
+    if not config.allow_privileged_remember:
+        raise ValueError(
+            f"{', '.join(options)} disabled by [security] allow_privileged_remember = false; "
+            "submit the candidate normally and have a reviewer run `kb promote`"
+        )
+    if not str(args.reason).strip():
+        raise ValueError(f"{', '.join(options)} requires --reason")
+    return {"options": options, "reason": str(args.reason).strip(), "actor": f"cli:{args.agent}"}
+
+
 def _versions(values: list[str]) -> dict[str, str]:
     result = {}
     for value in values:
@@ -367,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             learner = Learner(config)
             try:
-                result = learner.remember(candidate, force=args.force)
+                result = learner.remember(candidate, force=args.force, review=_privileged_review(args, config))
             finally:
                 learner.close()
             _emit(result, args.json)

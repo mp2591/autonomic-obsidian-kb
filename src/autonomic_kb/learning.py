@@ -161,18 +161,23 @@ class Learner:
                 return {"note": note, "kind": "exact", "similarity": 1.0}
         return None
 
-    def remember(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
+    def remember(
+        self, candidate: LearningCandidate, force: bool = False, review: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Submit a candidate. ``review`` records who used privileged options and why."""
         self._git_context = None
         candidate.validate()
-        reject_secrets(asdict(candidate))
+        reject_secrets([asdict(candidate), review])
         with semantic_transaction(self.config.vault):
             try:
-                return self._remember_locked(candidate, force)
+                return self._remember_locked(candidate, force, review)
             except Exception:
                 self.index.connection.rollback()
                 raise
 
-    def _remember_locked(self, candidate: LearningCandidate, force: bool = False) -> dict[str, Any]:
+    def _remember_locked(
+        self, candidate: LearningCandidate, force: bool = False, review: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         self.index.index_vault()
         if self.config.repo:
             for source in candidate.provenance:
@@ -360,7 +365,7 @@ class Learner:
             new_digest=sha256_text(rendered),
             reason="candidate promotion",
             confidence_after=candidate.confidence,
-            metadata={"status": status, "authorization": auth_reason},
+            metadata={"status": status, "authorization": auth_reason, **({"review": review} if review else {})},
         )
         self.index.index_vault()
         self.index.events.emit(
@@ -381,6 +386,7 @@ class Learner:
             "evidence": evidence_ids,
             "authorization": auth_reason,
             "security_findings": [finding.to_dict() for finding in findings],
+            **({"review": review} if review else {}),
         }
 
     def learn_json(self, path: str | Path) -> list[dict[str, Any]]:
