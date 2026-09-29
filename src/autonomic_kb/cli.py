@@ -31,6 +31,7 @@ from .retrieval import Retriever
 from .scoring import AUTHORITY
 from .security import TAINT_ORDER
 from .shadow import ShadowEvaluator
+from .storage import pending_transactions, resolve_transaction
 from .telemetry import TaskOutcome, TelemetryStore
 from .util import sha256_text, utc_now
 from .validation import Validator
@@ -147,6 +148,13 @@ def build_parser() -> argparse.ArgumentParser:
     supersede.add_argument("old_id")
     supersede.add_argument("new_id")
     supersede.add_argument("--reason", required=True)
+    reconcile = commands.add_parser("reconcile", help="inspect or resolve an interrupted transaction")
+    reconcile.add_argument("journal", nargs="?", help="journal to resolve; omit to list interrupted transactions")
+    reconcile_mode = reconcile.add_mutually_exclusive_group()
+    reconcile_mode.add_argument("--accept-current", action="store_true", help="keep the vault as it is now")
+    reconcile_mode.add_argument("--restore-snapshot", action="store_true", help="restore the before-state")
+    reconcile.add_argument("--delete-new", action="store_true", help="also delete files created since the crash")
+    reconcile.add_argument("--yes", action="store_true")
     queue = commands.add_parser("validation-queue")
     queue.add_argument("--limit", type=int, default=20)
     heal = commands.add_parser("heal")
@@ -426,6 +434,17 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 lifecycle.close()
             _emit(result, args.json)
+            return 0
+        if args.command == "reconcile":
+            if not args.journal:
+                _emit({"interrupted": pending_transactions(config.vault)}, args.json)
+                return 0
+            if not (args.accept_current or args.restore_snapshot):
+                raise ValueError("choose --accept-current or --restore-snapshot")
+            if not args.yes:
+                raise ValueError("reconciliation changes the vault; review `kb reconcile` output and pass --yes")
+            mode = "accept-current" if args.accept_current else "restore-snapshot"
+            _emit(resolve_transaction(config.vault, args.journal, mode, delete_new=args.delete_new), args.json)
             return 0
         if args.command == "validation-queue":
             validator = Validator(config)

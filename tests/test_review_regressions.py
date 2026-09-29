@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
@@ -33,7 +34,7 @@ from autonomic_kb.query_plan import build_query_plan
 from autonomic_kb.retrieval import Retriever
 from autonomic_kb.scoring import _matches_path, classify_task, feature_vector, scope_gate
 from autonomic_kb.security import reject_secrets
-from autonomic_kb.storage import semantic_files, semantic_transaction
+from autonomic_kb.storage import pending_transactions, resolve_transaction, semantic_files, semantic_transaction
 from autonomic_kb.util import atomic_write, sha256_file
 from autonomic_kb.validation import Validator
 from tests.support import make_vault, write_memory
@@ -230,17 +231,82 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(semantic_files(self.config.vault), before)
         self.assertEqual(list((self.config.vault / ".kb-transactions").glob("*.json")), [])
 
-    def test_in_place_edit_during_failed_transaction_fails_closed(self):
+    def test_failed_transaction_keeps_external_in_place_edits(self):
         edited = write_memory(self.config, "edited.md", "edited", "Edited", "original text")
+        replaced = write_memory(self.config, "replaced.md", "replaced", "Replaced", "kb text")
+        original = replaced.read_text()
         with self.assertRaises(RuntimeError), semantic_transaction(self.config.vault):
+            atomic_write(replaced, "kb change that must be undone\n")
             with edited.open("a", encoding="utf-8") as handle:
-                handle.write("appended in place, cannot be undone from a link snapshot\n")
+                handle.write("human edit saved in place by Obsidian\n")
+            atomic_write(self.config.vault / "human-new.md", "a note a human created meanwhile\n")
             raise RuntimeError("injected failure")
-        journals = list((self.config.vault / ".kb-transactions").glob("*.json"))
-        self.assertEqual(len(journals), 1)
-        self.assertEqual(json.loads(journals[0].read_text())["state"], "prepared")
-        with self.assertRaisesRegex(ValueError, "reconciliation"):
+        self.assertEqual(replaced.read_text(), original)
+        self.assertIn("human edit saved in place by Obsidian", edited.read_text())
+        self.assertEqual(list((self.config.vault / ".kb-transactions").glob("*.json")), [])
+        set_aside = list((self.config.vault / ".kb" / "rolled-back").rglob("human-new.md"))
+        self.assertEqual(len(set_aside), 1)
+        KnowledgeIndex(self.config).index_vault()  # not blocked
+
+    def _crash_inside_transaction(self, note: Path, content: str) -> None:
+        script = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb.storage import semantic_transaction\n"
+            "from autonomic_kb.util import atomic_write\n"
+            "with semantic_transaction(Path(sys.argv[1])):\n"
+            "    atomic_write(Path(sys.argv[2]), sys.argv[3])\n"
+            "    os._exit(1)\n"
+        )
+        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(self.config.vault), str(note), content], env=environment, check=False
+        )
+        self.assertEqual(result.returncode, 1)
+
+    def test_crash_is_reconciled_by_restoring_the_snapshot(self):
+        note = write_memory(self.config, "note.md", "note", "Note", "before the crash")
+        original = note.read_text()
+        self._crash_inside_transaction(note, "half-finished kb write\n")
+        with self.assertRaisesRegex(ValueError, "kb reconcile"):
             KnowledgeIndex(self.config).index_vault()
+        (self.config.vault / "after-crash.md").write_text("a note written after the crash\n")
+        pending = pending_transactions(self.config.vault)
+        self.assertEqual(pending[0]["files"], {"after-crash.md": "new", "note.md": "changed"})
+        result = resolve_transaction(self.config.vault, pending[0]["journal"], "restore-snapshot")
+        self.assertEqual(result["restored"], ["note.md"])
+        self.assertEqual(result["new_files"], ["after-crash.md"])
+        self.assertEqual(note.read_text(), original)
+        self.assertTrue((self.config.vault / "after-crash.md").exists())
+        self.assertEqual(pending_transactions(self.config.vault), [])
+        KnowledgeIndex(self.config).index_vault()
+
+    def test_crash_can_be_reconciled_by_accepting_current_files(self):
+        note = write_memory(self.config, "note.md", "note", "Note", "before the crash")
+        self._crash_inside_transaction(note, "kept after review\n")
+        journal = pending_transactions(self.config.vault)[0]["journal"]
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--vault", str(self.config.vault), "reconcile"]), 0)
+            self.assertEqual(main(["--vault", str(self.config.vault), "reconcile", journal, "--accept-current"]), 2)
+            code = main(["--vault", str(self.config.vault), "reconcile", journal, "--accept-current", "--yes"])
+        self.assertEqual(code, 0)
+        self.assertEqual(note.read_text(), "kept after review\n")
+        KnowledgeIndex(self.config).index_vault()
+
+    def test_legacy_inline_journals_and_incomplete_snapshots(self):
+        directory = self.config.vault / ".kb-transactions"
+        directory.mkdir()
+        note = self.config.vault / "legacy.md"
+        note.write_text("changed after crash\n")
+        (directory / "old.json").write_text(json.dumps({"state": "prepared", "before": {"legacy.md": "original\n"}}))
+        (directory / "partial.json").write_text(json.dumps({"state": "prepared", "snapshot": "partial", "files": None}))
+        with self.assertRaises(ValueError):
+            KnowledgeIndex(self.config).index_vault()
+        self.assertFalse((directory / "partial.json").exists())
+        self.assertEqual(pending_transactions(self.config.vault)[0]["files"], {"legacy.md": "changed"})
+        resolve_transaction(self.config.vault, "old", "restore-snapshot")
+        self.assertEqual(note.read_text(), "original\n")
+        KnowledgeIndex(self.config).index_vault()
 
     def test_committed_transactions_leave_no_journal_or_snapshot(self):
         write_memory(self.config, "a.md", "a", "A", "alpha")

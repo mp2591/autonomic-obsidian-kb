@@ -5,21 +5,24 @@ not a security sandbox or a lock respected by Obsidian.
 
 A transaction snapshots semantic files as hard links (a copy only where the filesystem
 cannot link), so starting one costs one link per file rather than reading and journaling
-the whole vault. KB writes replace files atomically, which leaves the linked inode holding
-the before-state. An in-place edit during a failed transaction cannot be undone from a
-link, so rollback then fails closed and leaves the journal for owner reconciliation.
+the whole vault. KB writes replace files atomically or rename them, which leaves the
+linked inode holding the before-state. Rollback restores what the KB replaced and keeps
+external in-place edits (a file that still has its recorded inode). Only a crash leaves a
+prepared journal behind; ``kb reconcile`` resolves it under owner control.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from .util import atomic_write, stable_json
 
@@ -131,52 +134,189 @@ def _link_or_copy(source: Path, destination: Path) -> None:
 
 
 def _snapshot(vault: Path, snapshot: Path) -> dict[str, list[int]]:
+    """Link every semantic file into ``snapshot``; record size, mtime and inode of the original."""
     files: dict[str, list[int]] = {}
     for path in semantic_paths(vault):
         relative = path.relative_to(vault).as_posix()
         try:
+            stat = path.stat()
             _link_or_copy(path, snapshot / relative)
         except FileNotFoundError:
             continue  # removed concurrently; nothing to restore
-        stat = (snapshot / relative).stat()
-        files[relative] = [stat.st_size, stat.st_mtime_ns]
+        files[relative] = [stat.st_size, stat.st_mtime_ns, stat.st_ino]
     return files
 
 
-def _restore(vault: Path, snapshot: Path, files: dict[str, list[int]]) -> list[str]:
-    """Restore the before-state; return paths that could not be restored faithfully."""
-    unrecoverable: list[str] = []
+def _restore_file(saved: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.parent / f".{target.name}.kb-restore-{uuid.uuid4().hex}"
+    _link_or_copy(saved, temporary)
+    os.replace(temporary, target)
+
+
+def _set_aside(vault: Path, identity: str, relative: str) -> None:
+    """Move a file created during a failed transaction to local runtime state instead of deleting it."""
+    destination = vault / ".kb" / "rolled-back" / identity / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(vault / relative, destination)
+
+
+def _restore(vault: Path, identity: str, snapshot: Path, files: dict[str, list[int]]) -> list[str]:
+    """Undo KB changes; return files whose before-state is missing from the snapshot.
+
+    KB writes replace files (new inode) or rename them. A file that still has its
+    recorded inode was never replaced by the transaction, so any change to it is an
+    external in-place edit (for example Obsidian saving) and is kept.
+    """
+    unavailable: list[str] = []
     for path in semantic_paths(vault):
-        if path.relative_to(vault).as_posix() not in files:
-            path.unlink()
-    for relative, (size, mtime_ns) in sorted(files.items()):
+        relative = path.relative_to(vault).as_posix()
+        if relative not in files:
+            _set_aside(vault, identity, relative)
+    for relative, recorded in sorted(files.items()):
         saved = snapshot / relative
         target = vault / relative
+        inode = recorded[2] if len(recorded) > 2 else None
         try:
-            stat = saved.stat()
-        except OSError:
-            unrecoverable.append(relative)
+            current = target.stat()
+        except FileNotFoundError:
+            current = None
+        if current is not None and inode is not None and current.st_ino == inode:
             continue
-        if (stat.st_size, stat.st_mtime_ns) != (size, mtime_ns):
-            unrecoverable.append(relative)  # edited in place through the shared inode
+        if current is not None and saved.exists() and os.path.samefile(saved, target):
             continue
-        if target.exists() and os.path.samefile(saved, target):
+        if not saved.exists():
+            unavailable.append(relative)
             continue
-        temporary = target.parent / f".{target.name}.kb-restore-{uuid.uuid4().hex}"
-        _link_or_copy(saved, temporary)
-        os.replace(temporary, target)
-    return unrecoverable
+        _restore_file(saved, target)
+    return unavailable
+
+
+def _journals(vault: Path) -> list[tuple[Path, dict[str, Any]]]:
+    rows = []
+    for path in sorted((vault / JOURNAL_DIRECTORY).glob("*.json")):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"unreadable transaction journal requires reconciliation: {path.name}") from error
+        rows.append((path, row if isinstance(row, dict) else {}))
+    return rows
+
+
+def _discard(journal: Path) -> None:
+    journal.unlink(missing_ok=True)
+    shutil.rmtree(journal.with_suffix(""), ignore_errors=True)
 
 
 def recover_transactions(vault: Path) -> None:
     """Fail closed on an interrupted transaction; never overwrite later human edits."""
     if str(vault.resolve()) in getattr(_LOCAL, "transactions", set()):
         return
-    directory = vault / JOURNAL_DIRECTORY
-    for path in directory.glob("*.json"):
+    blocking = []
+    for path, row in _journals(vault):
+        if row.get("state") != "prepared":
+            continue
+        if "files" in row and row["files"] is None and "before" not in row:
+            # Interrupted while snapshotting: nothing had been modified yet.
+            _discard(path)
+            continue
+        blocking.append(path.name)
+    if blocking:
+        raise ValueError(
+            f"interrupted semantic transaction requires reconciliation: {', '.join(blocking)}; run `kb reconcile`"
+        )
+
+
+def pending_transactions(vault: Path) -> list[dict[str, Any]]:
+    """Describe interrupted transactions and how each protected file differs from its before-state."""
+    result = []
+    current = {path.relative_to(vault).as_posix() for path in semantic_paths(vault)}
+    for path, row in _journals(vault):
+        if row.get("state") != "prepared":
+            continue
+        files: dict[str, str] = {}
+        if "before" in row:  # 0.3.0 journals stored the before-state inline
+            before = row.get("before") or {}
+            for relative, content in before.items():
+                target = vault / relative
+                if not target.exists():
+                    files[relative] = "missing"
+                else:
+                    same = target.read_text(encoding="utf-8") == content
+                    files[relative] = "unchanged" if same else "changed"
+            known = set(before)
+        else:
+            snapshot = path.with_suffix("")
+            recorded = row.get("files") or {}
+            for relative in recorded:
+                saved, target = snapshot / relative, vault / relative
+                if not target.exists():
+                    files[relative] = "missing" if saved.exists() else "missing-unavailable"
+                elif not saved.exists():
+                    files[relative] = "unavailable"
+                elif os.path.samefile(saved, target) or saved.read_bytes() == target.read_bytes():
+                    files[relative] = "unchanged"
+                else:
+                    files[relative] = "changed"
+            known = set(recorded)
+        for relative in sorted(current - known):
+            files[relative] = "new"
+        result.append(
+            {
+                "journal": path.stem,
+                "format": "inline" if "before" in row else "snapshot",
+                "files": {key: value for key, value in sorted(files.items()) if value != "unchanged"},
+                "unchanged": sum(value == "unchanged" for value in files.values()),
+            }
+        )
+    return result
+
+
+def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: bool = False) -> dict[str, Any]:
+    """Resolve an interrupted transaction under owner control.
+
+    ``accept-current`` keeps the vault as it is. ``restore-snapshot`` restores every
+    changed or missing file from the before-state; files created since are listed and
+    kept unless ``delete_new`` is set, because they may be notes written after the crash.
+    """
+    if mode not in {"accept-current", "restore-snapshot"}:
+        raise ValueError("mode must be accept-current or restore-snapshot")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", journal):
+        raise ValueError("invalid journal identity")
+    with vault_lock(vault):
+        path = vault / JOURNAL_DIRECTORY / f"{journal}.json"
         row = json.loads(path.read_text(encoding="utf-8"))
-        if row.get("state") == "prepared":
-            raise ValueError(f"interrupted semantic transaction requires reconciliation: {path.name}")
+        if row.get("state") != "prepared":
+            raise ValueError(f"journal {journal} is not an interrupted transaction")
+        status = next(item for item in pending_transactions(vault) if item["journal"] == journal)["files"]
+        restored: list[str] = []
+        unavailable: list[str] = []
+        new = sorted(relative for relative, state in status.items() if state == "new")
+        if mode == "restore-snapshot":
+            before = row.get("before")
+            for relative, state in status.items():
+                if state not in {"changed", "missing"}:
+                    if state in {"unavailable", "missing-unavailable"}:
+                        unavailable.append(relative)
+                    continue
+                target = vault / relative
+                if before is not None:
+                    atomic_write(target, before[relative])
+                else:
+                    _restore_file(path.with_suffix("") / relative, target)
+                restored.append(relative)
+            if delete_new:
+                for relative in new:
+                    (vault / relative).unlink(missing_ok=True)
+        _discard(path)
+        return {
+            "journal": journal,
+            "mode": mode,
+            "restored": sorted(restored),
+            "unavailable": sorted(unavailable),
+            "new_files": new,
+            "new_files_deleted": bool(delete_new and mode == "restore-snapshot"),
+        }
 
 
 def _discard_finished_journals(directory: Path) -> None:
@@ -202,35 +342,28 @@ def semantic_transaction(vault: Path):
         identity = uuid.uuid4().hex
         journal = directory / f"{identity}.json"
         snapshot = directory / identity
-        # Journal first: a crash while snapshotting still fails closed.
+        # Journal first; a crash while snapshotting leaves files=None, which is discarded later.
         atomic_write(journal, stable_json({"state": "prepared", "snapshot": identity, "files": None}))
         try:
             files = _snapshot(vault, snapshot)
             atomic_write(journal, stable_json({"state": "prepared", "snapshot": identity, "files": files}))
         except BaseException:
             # Nothing has been modified yet, so an incomplete snapshot is simply discarded.
-            journal.unlink(missing_ok=True)
-            shutil.rmtree(snapshot, ignore_errors=True)
+            _discard(journal)
             raise
         active = getattr(_LOCAL, "transactions", set())
         _LOCAL.transactions = active | {str(vault.resolve())}
         try:
             yield
         except BaseException:
-            unrecoverable = _restore(vault, snapshot, files)
-            if unrecoverable:
-                atomic_write(
-                    journal,
-                    stable_json(
-                        {"state": "prepared", "snapshot": identity, "files": files, "unrecoverable": unrecoverable}
-                    ),
-                )
+            unavailable = _restore(vault, identity, snapshot, files)
+            if unavailable:
+                row = {"state": "prepared", "snapshot": identity, "files": files, "unavailable": unavailable}
+                atomic_write(journal, stable_json(row))
             else:
-                journal.unlink(missing_ok=True)
-                shutil.rmtree(snapshot, ignore_errors=True)
+                _discard(journal)
             raise
         else:
-            journal.unlink(missing_ok=True)
-            shutil.rmtree(snapshot, ignore_errors=True)
+            _discard(journal)
         finally:
             _LOCAL.transactions = active
