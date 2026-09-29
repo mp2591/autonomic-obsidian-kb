@@ -19,7 +19,7 @@ from .util import sha256_text, stable_json, terms, utc_now
 SCHEMA_VERSION = 2
 # Bump whenever parsing or index-time verdicts (such as the content safety scan) change;
 # unchanged notes are then re-read once instead of trusting stale derived columns.
-PARSER_FORMAT = "v3.1.0"
+PARSER_FORMAT = "v3.2.0"
 
 
 @dataclass(slots=True)
@@ -598,12 +598,14 @@ class KnowledgeIndex:
         wanted = sorted({str(identity) for identity in identities})
         if not wanted:
             return {}
-        wanted_set = set(wanted)
-        cached = {
-            row["evidence_id"]: row
-            for row in self.connection.execute("SELECT * FROM evidence_checks").fetchall()
-            if row["evidence_id"] in wanted_set
-        }
+        cached: dict[str, sqlite3.Row] = {}
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for row in self.connection.execute(
+                f"SELECT * FROM evidence_checks WHERE evidence_id IN ({placeholders})", chunk
+            ):
+                cached[row["evidence_id"]] = row
         result: dict[str, bool] = {}
         updates = []
         for identity in wanted:

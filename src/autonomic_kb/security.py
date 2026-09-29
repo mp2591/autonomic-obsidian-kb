@@ -10,7 +10,8 @@ _SECRET_PATTERNS = {
     "github-token": re.compile(r"\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}\b"),
     "aws-access-key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     "generic-secret": re.compile(
-        r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*['\"]?[A-Za-z0-9_./+\-=]{12,}"
+        # An optional closing quote after the key also covers dict and JSON renderings.
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b['\"]?\s*[:=]\s*['\"]?[A-Za-z0-9_./+\-=]{12,}"
     ),
 }
 _INJECTION_PATTERNS = {
@@ -64,7 +65,7 @@ def scan_content(text: str) -> list[SecurityFinding]:
 
 def _high_entropy_assignments(text: str) -> list[SecurityFinding]:
     result: list[SecurityFinding] = []
-    pattern = re.compile(r"(?i)\b(?:key|token|secret|password)\w*\s*[:=]\s*['\"]?([A-Za-z0-9+/=_-]{20,})")
+    pattern = re.compile(r"(?i)\b(?:key|token|secret|password)\w*['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9+/=_-]{20,})")
     for match in pattern.finditer(text):
         value = match.group(1)
         probs = [value.count(char) / len(value) for char in set(value)]
@@ -139,6 +140,8 @@ def _string_leaves(value: object) -> Iterable[str]:
         elif isinstance(item, dict):
             for key, child in item.items():
                 stack.extend((key, child))
+                if isinstance(key, str) and isinstance(child, str | int | float) and not isinstance(child, bool):
+                    yield f"{key}: {child}"  # a secret may be recognizable only next to its key
         elif isinstance(item, list | tuple | set | frozenset):
             stack.extend(item)
         elif item is not None and not isinstance(item, bool | int | float):

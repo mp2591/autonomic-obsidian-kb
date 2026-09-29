@@ -184,6 +184,23 @@ class TransactionTests(unittest.TestCase):
             if path.is_file():
                 self.assertNotIn("abcdefghijklmnopqrstuvwxyz0123456789", path.read_text(errors="ignore"))
 
+    def test_keyed_secrets_in_frontmatter_and_dicts_are_detected(self):
+        with self.assertRaises(ValueError):
+            reject_secrets({"password": "hunter2hunter2hunter2"})
+        write_memory(
+            self.config,
+            "db.md",
+            "kb:global:fact:db",
+            "DB",
+            "database settings",
+            scope="global",
+            password="hunter2hunter2hunter2",
+        )
+        server = MCPServer(self.config)
+        self.assertEqual(server.read_resource("kb://memory/kb:global:fact:db"), {"error": "not-found"})
+        with KnowledgeIndex(self.config) as index:
+            self.assertEqual(Retriever(self.config, index).retrieve("database settings", budget=200).items, [])
+
     def test_heal_can_quarantine_a_secret_bearing_note(self):
         note = write_memory(self.config, "leak.md", "kb:repository:fact:leak", "Leak", "config value")
         note.write_text(note.read_text() + "\napi_key = abcdefghijklmnopqrstuvwxyz0123456789\n")

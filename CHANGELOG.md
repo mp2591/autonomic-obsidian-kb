@@ -4,11 +4,20 @@
 
 Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`.
 
+### Breaking
+
+- A repository-, project-, module- or branch-scoped memory with neither `repository_id` nor `repo` is now excluded wherever a repository is active. That includes every memory written by 0.3.0 `kb remember` without `--repo` against a vault outside Git, which was the documented `CLAUDE.md` flow. `kb validate` lists them as `missing-repository-identity`; give each a `repository_id` (or legacy `repo`) or change its scope to `global` or `user`.
+- `kb` exits with an error when it cannot find a vault (no `--vault`, no `KB_VAULT`, and no parent directory containing `kb.toml` or `.obsidian`), and `--vault` must name an existing directory. Run `kb init <path>` first.
+- Without `--repo` or `KB_REPO`, the scoping repository is the Git worktree of the current directory rather than the one containing the vault. Pass `--repo` explicitly where the working directory is not the project (hooks, schedulers, MCP launchers).
+- `kb init` creates its starter note with `global` scope and the identity `kb:global:repository-map:knowledge-base`.
+- The index gains derived columns and a parser-format bump, so the first command after upgrading re-reads every note and re-verifies evidence once.
+
 ### Security and scoping
 
 - The scoping repository comes from `--repo`, then `KB_REPO`, then the Git worktree of the working directory. It is never taken from the vault's location: a vault kept in Git gave every project the vault's identity, and a vault outside Git gave memories no identity, so they leaked into unrelated repositories.
 - A repository-, project-, module- or branch-scoped memory without a repository identity is excluded wherever a repository is active, and `kb validate` warns about it. Legacy `repo:` names also match the remote repository name, so checkouts in differently named directories work.
 - Secret scanning inspects every string of a structured value. Scanning a JSON dump let escaping hide a secret that started a line, and `kb remember` then persisted it into quarantine, evidence, and the index.
+- Keyed secrets are recognized after a quoted key, as in dict and JSON renderings. A frontmatter line such as `password: …` passed the read gate and was returned by `kb://memory/<id>`.
 - A note declaring an already-indexed identity can no longer take over that identity's index row. Before, the newcomer's content could be served as the canonical memory for one retrieval, and the identity stayed with the newcomer.
 - `kb` no longer treats an arbitrary working directory as a vault; without `--vault`, `KB_VAULT`, or a directory containing `kb.toml` or `.obsidian`, it exits with an error instead of creating state directories.
 
@@ -33,7 +42,17 @@ Fixes from the September 2026 repository review. Each defect has a reproduction 
 
 ### Performance
 
-On a synthetic 2,000-note vault, `kb remember` fell from 5.6 s to 0.47 s and `kb retrieve` from 1.27 s to 0.40 s. Writes reindex incrementally (a replaced file is detected by inode) instead of reparsing the vault. Content-safety verdicts are stored at index time. Evidence checks are cached on file identity including ctime. The YAML parser uses libyaml when available.
+Measured on a synthetic 2,000-note vault against 0.3.0:
+
+| Operation | 0.3.0 | Now |
+|---|---|---|
+| `kb remember` (CLI, wall clock) | 5.6 s | 0.47 s |
+| `kb retrieve` (CLI, wall clock, warm) | 1.18 s | 0.40 s |
+| Retrieval, in process, warm | 1.14 s | 0.18 s |
+| First retrieval, including index build | 4.96 s | 3.62 s |
+| MCP `kb://memories` | 2.50 s | 0.15 s |
+
+Writes reindex incrementally instead of reparsing the vault; a replaced file is detected by inode. Content-safety verdicts are stored at index time. Evidence checks are cached on file identity including ctime, so warm figures assume an unchanged evidence store. MCP catalog reads verify evidence in one batch. The YAML parser uses libyaml when available.
 
 ### Benchmark
 
