@@ -29,6 +29,8 @@ require_instruction_authorization = true
 # are allowed with --reason (recorded in the ledger), and candidates whose score clears
 # promotion_threshold activate automatically. false: no self-vouching of any kind; every
 # candidate (remember, learn, consolidate, MCP) waits in the inbox for `kb promote`.
+# Review is then mandatory and auditable, not authenticated: reviewer commands are ordinary
+# CLI commands, so restrict agents to MCP to control who reviews.
 allow_privileged_remember = true
 
 [paths]
