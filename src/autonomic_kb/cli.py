@@ -13,7 +13,7 @@ from typing import Any
 
 from . import __version__
 from .benchmark import BenchmarkRunner, TraceBenchmarkRunner, compare_to_reference
-from .config import KBConfig, initialize_vault
+from .config import KBConfig, initialize_vault, missing_local_ignores
 from .dashboard import dashboard_data
 from .evidence import EvidenceStore
 from .git_context import inspect_git
@@ -713,6 +713,17 @@ def _doctor(config: KBConfig) -> dict[str, Any]:
         checks.append(
             {"check": "jsonschema", "ok": False, "detail": "install project dependencies for full schema validation"}
         )
+    missing_ignores = missing_local_ignores(config.vault)
+    checks.append(
+        {
+            "check": "vault-gitignore",
+            "ok": not missing_ignores,
+            "optional": True,
+            "detail": "local state is ignored"
+            if not missing_ignores
+            else "add to the vault .gitignore before committing it: " + ", ".join(missing_ignores),
+        }
+    )
     obsidian = ObsidianBridge(config.vault).status()
     checks.append(
         {

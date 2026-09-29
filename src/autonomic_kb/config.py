@@ -208,6 +208,28 @@ def resolve_repo(value: str | Path | None = None, *, discover: bool = True) -> P
     return find_repo(Path.cwd()) if discover else None
 
 
+LOCAL_STATE_IGNORES = (".kb/", ".kb-transactions/", ".kb-writer.lock")
+
+
+def missing_local_ignores(vault: Path) -> list[str]:
+    """Local-only state entries absent from the vault's .gitignore."""
+    path = vault / ".gitignore"
+    present = set(path.read_text(encoding="utf-8").split()) if path.is_file() else set()
+    return [entry for entry in LOCAL_STATE_IGNORES if entry not in present]
+
+
+def ensure_vault_gitignore(vault: Path) -> list[str]:
+    """Keep indexes, backups (which hold unredacted originals), and journals out of Git."""
+    missing = missing_local_ignores(vault)
+    if missing:
+        path = vault / ".gitignore"
+        existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+        prefix = existing if not existing or existing.endswith("\n") else existing + "\n"
+        block = "# autonomic-obsidian-kb local state (derived, may hold unredacted backups)\n" + "\n".join(missing)
+        path.write_text(prefix + block + "\n", encoding="utf-8")
+    return missing
+
+
 def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:
     vault = Path(path).expanduser().resolve()
     vault.mkdir(parents=True, exist_ok=True)
@@ -216,4 +238,5 @@ def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:
         raise FileExistsError(f"{config_path} already exists; pass --force to replace it")
     config_path.write_text(DEFAULT_CONFIG, encoding="utf-8")
     (vault / ".obsidian").mkdir(exist_ok=True)
+    ensure_vault_gitignore(vault)
     return KBConfig.load(vault)

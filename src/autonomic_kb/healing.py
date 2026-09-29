@@ -9,6 +9,7 @@ from .config import KBConfig
 from .evidence import OperationLedger
 from .index import KnowledgeIndex
 from .markdown import dump_frontmatter, parse_markdown
+from .security import redact_secrets, redact_value
 from .storage import semantic_transaction, vault_markdown_paths
 from .util import age_days, atomic_write, jaccard, sha256_text, slugify, utc_now
 from .validation import ValidationReport, Validator
@@ -203,10 +204,15 @@ class Healer:
             atomic_write(path, before.replace(f"[[{target}]]", f"[[{replacement}]]"))
             action.applied = True
         elif action.action == "quarantine":
+            # Secret values are redacted in the vault copy; the unredacted original survives only
+            # in the local .kb/backups copy made above. Injection text is kept for review.
+            metadata, redacted_metadata = redact_value(metadata)
+            body, redacted_body = redact_secrets(parsed.body)
+            action.details["redacted"] = redacted_metadata + redacted_body
             metadata["status"] = "quarantined"
             metadata["freshness"] = "untrusted"
             metadata["updated"] = now
-            atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
+            atomic_write(path, dump_frontmatter(metadata) + body.lstrip())
             destination = self.config.vault / self.config.quarantine_dir / path.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination != path:
@@ -220,13 +226,16 @@ class Healer:
                 self.config.vault / str(action.details.get("destination", action.path)) if action.details else path
             )
             after = current_path.read_text(encoding="utf-8") if current_path.exists() else ""
+            quarantined = action.action == "quarantine"
             self.operations.append(
-                "QUARANTINE" if action.action == "quarantine" else "AMEND",
+                "QUARANTINE" if quarantined else "AMEND",
                 memory_id or action.path,
                 actor="healer",
                 previous_digest=sha256_text(before),
                 new_digest=sha256_text(after),
-                reason=action.reason,
+                # Finding excerpts may contain secret fragments; the ledger keeps only counts.
+                reason="unsafe content quarantined" if quarantined else action.reason,
+                metadata={"redacted": action.details.get("redacted", 0)} if quarantined else {},
             )
             return current_path, backup
         return None

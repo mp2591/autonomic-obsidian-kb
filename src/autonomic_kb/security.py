@@ -4,6 +4,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 _SECRET_PATTERNS = {
     "private-key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----"),
@@ -73,6 +74,63 @@ def _high_entropy_assignments(text: str) -> list[SecurityFinding]:
         if entropy >= 3.5:
             result.append(SecurityFinding("secret", "high-entropy-assignment", "[REDACTED]", "critical"))
     return result
+
+
+_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?P<kind>(?:RSA |EC |OPENSSH |PGP )?)PRIVATE KEY-----"
+    r".*?(?:-----END (?P=kind)PRIVATE KEY-----|\Z)",
+    re.S,
+)
+_KEYED_SECRET = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\b['\"]?\s*[:=]\s*['\"]?)([A-Za-z0-9_./+\-=]{12,})"
+)
+_KEYED_ENTROPY = re.compile(r"(?i)(\b(?:key|token|secret|password)\w*['\"]?\s*[:=]\s*['\"]?)([A-Za-z0-9+/=_-]{20,})")
+
+
+def _entropy(value: str) -> float:
+    return -sum((value.count(char) / len(value)) * math.log2(value.count(char) / len(value)) for char in set(value))
+
+
+def redact_secrets(text: str) -> tuple[str, int]:
+    """Replace every secret the scanner recognizes; keep key names so the note stays reviewable."""
+    count = 0
+
+    def replace(match: re.Match[str], keep_key: bool = True, entropy: bool = False) -> str:
+        nonlocal count
+        if entropy and _entropy(match.group(2)) < 3.5:
+            return match.group(0)
+        count += 1
+        return (match.group(1) if keep_key else "") + "[REDACTED]"
+
+    text = _PRIVATE_KEY_BLOCK.sub(lambda match: replace(match, keep_key=False), text)
+    for name in ("github-token", "aws-access-key"):
+        text = _SECRET_PATTERNS[name].sub(lambda match: replace(match, keep_key=False), text)
+    text = _KEYED_SECRET.sub(replace, text)
+    text = _KEYED_ENTROPY.sub(lambda match: replace(match, entropy=True), text)
+    return text, count
+
+
+def redact_value(value: Any) -> tuple[Any, int]:
+    """Redact every string leaf of a nested value, including a secret recognizable only beside its key."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, list):
+        items = [redact_value(item) for item in value]
+        return [item for item, _ in items], sum(count for _, count in items)
+    if isinstance(value, dict):
+        result: dict[Any, Any] = {}
+        total = 0
+        for key, child in value.items():
+            if isinstance(key, str) and isinstance(child, str):
+                pair, count = redact_secrets(f"{key}: {child}")
+                if count:
+                    result[key] = pair.split(": ", 1)[1] if ": " in pair else "[REDACTED]"
+                    total += count
+                    continue
+            result[key], count = redact_value(child)
+            total += count
+        return result, total
+    return value, 0
 
 
 def _redact(value: str) -> str:
