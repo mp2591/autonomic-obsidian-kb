@@ -18,8 +18,10 @@ from .security import TAINT_ORDER, instruction_authorized, reject_secrets, scan_
 from .storage import semantic_transaction
 from .util import atomic_write, estimate_tokens, jaccard, sha256_file, sha256_text, slugify, stable_json, utc_now
 
-# Promotion inputs a caller could inflate to approve its own candidate.
+# Promotion inputs a caller could inflate to approve its own candidate. Validators count
+# toward the score, and an imported validator is only the caller's claim.
 SELF_ASSESSED_FIELDS = (
+    "validators",
     "reuse_likelihood",
     "rediscovery_cost",
     "stability",

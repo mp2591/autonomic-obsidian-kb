@@ -151,13 +151,24 @@ def move_into(source: Path, directory: Path, identity: str) -> Path:
         except FileExistsError:
             continue
         except OSError:
-            if destination.exists() or destination.is_symlink():
+            # No hard links here: copy into an exclusively created file instead of renaming,
+            # because rename would replace a file an external editor created meanwhile.
+            try:
+                _copy_exclusive(source, destination)
+            except FileExistsError:
                 continue
-            os.rename(source, destination)
-            return destination
         source.unlink()
         return destination
     raise FileExistsError(f"no free file name for {source.name} in {directory}")
+
+
+def _copy_exclusive(source: Path, destination: Path) -> None:
+    """Copy to ``destination`` only if it does not exist (O_EXCL); never replaces a file."""
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        shutil.copyfileobj(reader, writer)
+        writer.flush()
+        os.fsync(writer.fileno())
+    shutil.copystat(source, destination)
 
 
 def _link_or_copy(source: Path, destination: Path) -> None:

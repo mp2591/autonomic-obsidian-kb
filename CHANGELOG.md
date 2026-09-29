@@ -21,7 +21,7 @@ Fixes from the September 2026 repository review. Each defect has a reproduction 
 - `kb init` creates its starter note with `global` scope and the identity `kb:global:repository-map:knowledge-base`.
 - `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` now require `--reason`; scripts using them must add one.
 - `kb lease` refuses the default `generic` agent identity; pass `--agent` or set `KB_AGENT` (the 0.3.0 README example omitted it).
-- `kb learn --file` ignores caller-supplied value estimates (`reuse_likelihood`, `rediscovery_cost`, `stability`, `uniqueness`, `token_savings`, `maintenance_cost`), so imported candidates score like MCP candidates.
+- `kb learn --file` ignores caller-supplied value estimates (`reuse_likelihood`, `rediscovery_cost`, `stability`, `uniqueness`, `token_savings`, `maintenance_cost`) and `validators`, all of which raise the promotion score, so imported candidates score like MCP candidates.
 - With `[security] allow_privileged_remember = false`, no candidate from any path is promoted automatically; every one waits in the inbox for `kb promote`.
 - The index gains derived columns and a parser-format bump, so the first command after upgrading re-reads every note and re-verifies evidence once.
 

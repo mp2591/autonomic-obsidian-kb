@@ -22,8 +22,10 @@ from autonomic_kb.healing import Compactor, Healer, forget
 from autonomic_kb.index import KnowledgeIndex
 from autonomic_kb.learning import Learner, LearningCandidate
 from autonomic_kb.lifecycle import Lifecycle
+from autonomic_kb.mcp_server import MCPServer
 from autonomic_kb.observability import EventLog
-from autonomic_kb.storage import semantic_transaction
+from autonomic_kb.semantic import LocalEmbeddingBackend
+from autonomic_kb.storage import move_into, semantic_transaction
 from autonomic_kb.util import atomic_write
 from tests.support import make_vault, write_memory
 
@@ -66,6 +68,20 @@ class SelfPromotionTests(unittest.TestCase):
             self.assertEqual(learner.learn_json(source)[0]["status"], "inbox")
         finally:
             learner.close()
+
+    def test_imported_validators_cannot_pad_the_score(self):
+        permissive = make_vault(Path(self.temporary.name) / "padded")
+        values = {"title": "Padded", "summary": "Unevidenced claim.", "validators": [{}, {}, {}]}
+        self.assertEqual(LearningCandidate.from_dict(values).validators, [])
+        source = Path(self.temporary.name) / "padded.json"
+        source.write_text(json.dumps(values))
+        learner = Learner(permissive)
+        try:
+            self.assertEqual(learner.learn_json(source)[0]["status"], "inbox")
+        finally:
+            learner.close()
+        with self.assertRaisesRegex(ValueError, "schema"):
+            MCPServer(permissive).call_tool("kb_remember", values)
 
     def test_evidence_padding_cannot_promote_when_review_is_required(self):
         store = EvidenceStore(self.config)
@@ -151,6 +167,28 @@ class NoClobberMoveTests(unittest.TestCase):
             healer.close()
         self._assert_all_folders_present(self.config.quarantine_dir)
 
+    def test_fallback_move_never_replaces_a_file_created_concurrently(self):
+        directory = self.config.vault / "target"
+        directory.mkdir()
+        existing = directory / "note.md"
+        existing.write_text("created by an external editor\n")
+        source = self.config.vault / "note.md"
+        source.write_text("moving note\n")
+        real_exists = Path.exists
+
+        def racing_exists(path: Path) -> bool:  # the editor creates the file after the check
+            return False if path.parent == directory else real_exists(path)
+
+        with (
+            patch("autonomic_kb.storage.os.link", side_effect=PermissionError("links unsupported")),
+            patch.object(Path, "exists", racing_exists),
+        ):
+            moved = move_into(source, directory, "kb:global:fact:note")
+        self.assertEqual(existing.read_text(), "created by an external editor\n")
+        self.assertNotEqual(moved, existing)
+        self.assertEqual(moved.read_text(), "moving note\n")
+        self.assertFalse(source.exists())
+
     def test_promotion_never_overwrites_a_note_in_the_type_directory(self):
         identities = self._same_named(self.config.inbox_dir, status="inbox")
         lifecycle = Lifecycle(self.config)
@@ -231,6 +269,31 @@ class MinorIssueTests(unittest.TestCase):
         self.assertFalse(old.parent.exists())
         self.assertFalse(stale.parent.exists())
         self.assertTrue(list((self.config.runtime_dir / "rolled-back").rglob("fresh.md")))
+
+    def test_embedding_cache_drops_deleted_notes_without_new_vectors(self):
+        class Vectors(list):
+            def tolist(self):
+                return [list(item) for item in self] if self and isinstance(self[0], list) else list(self)
+
+        class FakeModel:
+            def encode(self, texts, normalize_embeddings=True):
+                return Vectors(Vectors([1.0, 1.0, 1.0]) for _ in texts)
+
+        first = write_memory(self.config, "one.md", "one", "One", "first note")
+        write_memory(self.config, "two.md", "two", "Two", "second note")
+        backend = LocalEmbeddingBackend(self.config)
+        with (
+            patch.object(LocalEmbeddingBackend, "available", new=True),
+            patch.object(LocalEmbeddingBackend, "_load_model", return_value=FakeModel()),
+            KnowledgeIndex(self.config) as index,
+        ):
+            index.index_vault()
+            backend.search(index, "note")
+            first.unlink()
+            index.index_vault()
+            backend.search(index, "note")
+        cached = json.loads(backend.cache_path.read_text())
+        self.assertEqual({key.split(":", 1)[0] for key in cached}, {"two"})
 
     def test_mermaid_output_is_deterministic(self):
         write_memory(self.config, "a.md", "a", "A", "alpha", relations={"related-to": ["missing-target"]})
