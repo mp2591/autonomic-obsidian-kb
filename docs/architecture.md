@@ -13,7 +13,7 @@
 
 ## Derived state
 
-`.kb/` contains SQLite/FTS5, link projections, rank examples, traces, feedback, outcomes, learned soft ranking policy, code graph, optional embeddings, backups and short-lived leases. It may be deleted and rebuilt without destroying canonical knowledge or evidence.
+`.kb/` contains SQLite/FTS5, link projections, rank examples, traces, receipts, context-state inventories, the code graph, optional embeddings, heal backups, rolled-back files and short-lived leases. Feedback and outcomes are durable vault files (`.kb-feedback.jsonl`, `.kb-outcomes.jsonl`). Learned ranking is disabled in this release, so no policy file is read. It may be deleted and rebuilt without destroying canonical knowledge or evidence.
 
 ## Retrieval control loop
 
@@ -25,19 +25,19 @@ task + Git/repository/symbol context
   -> Reciprocal Rank Fusion
   -> bounded canonical graph expansion
   -> HARD scope/trust/authorization/temporal gates
-  -> calibrated soft utility scoring
+  -> fixed, versioned soft utility scoring (learned calibration disabled)
   -> redundancy-aware set-level token allocation
   -> task-specific context compiler
   -> proof-bearing minimal manifest
   -> agent outcome/feedback
-  -> shadow/offline policy calibration
+  -> shadow/offline route comparison
 ```
 
-Hard policy gates are deliberately outside the learned ranker. A learned policy cannot make a cross-repository, quarantined, unauthorized instruction, or temporally invalid memory eligible.
+Hard policy gates are deliberately outside any ranker. A future learned policy could not make a cross-repository, quarantined, unauthorized instruction, or temporally invalid memory eligible.
 
 ## Autonomic loop
 
-Episodes and evidence are captured first. Candidate promotion is type- and trust-aware. Validators can test files, hashes and allowlisted commands inside the repository. Validation failures can mark memories stale. Healing is dry-run by default, backs up files, emits operations, revalidates, and rolls back if error count increases. Consolidation and compaction preserve evidence rather than treating the latest summary as the only historical record.
+Episodes and evidence are captured first. Candidate promotion is type- and trust-aware, and reviewer commands (`kb inbox`, `promote`, `revalidate`, `supersede`, `merge`, `split`) are the gate to retrievable knowledge. Validators check file existence and source hashes inside the repository; note-defined commands are never executed. Validation failures can mark memories stale. Healing is dry-run by default, backs up files, emits operations, revalidates, and rolls back if error count increases. Consolidation and compaction preserve evidence rather than treating the latest summary as the only historical record.
 
 ## Obsidian boundary
 

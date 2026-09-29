@@ -24,7 +24,7 @@ The system may return `no_retrieval_needed`, `insufficient_evidence`, or `confli
 
 ## Learned ranking
 
-Feedback labels train only soft-feature weights in `.kb/rank-policy.json`. Scope, trust, authorization and temporal validity remain non-learnable constraints. Candidate policies can be compared in shadow mode before they affect an agent.
+Learned ranking is disabled in this release: ranking uses a fixed, versioned policy, `kb calibrate` returns an explicit disabled result, and `.kb/rank-policy.json` is ignored. Feedback and rank examples are recorded for offline evaluation. If a learned policy is enabled later it may only adjust soft-feature weights; scope, trust, authorization and temporal validity remain non-learnable constraints, and candidate policies are compared in shadow mode first.
 
 ## Dense retrieval
 

@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`.
+Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`; defects from the follow-up review are reproduced in `tests/test_second_review.py`.
+
+### Follow-up review
+
+- `[security] allow_privileged_remember = false` now means no self-vouching on any path. Before, it refused only the CLI privileged options, while `kb learn --file` with self-assigned value estimates, consolidation of an episode backed by self-asserted `evaluation` evidence, and a `remember` padded with self-created evidence still produced active memories. With the switch off, every candidate waits in the inbox for `kb promote`, and library `force` no longer bypasses it. The earlier claim that the switch required review "for everything" was not true until this change.
+- Imported candidates (`kb learn --file`) can no longer set the value estimates that decide promotion, matching MCP.
+- Archiving, quarantine, and reviewer moves never overwrite an existing file. A taken name gets a suffix from a hash of the full memory identity, and moves use link-then-unlink. Before, the suffix came from the first characters of the identity or path, which most notes share, so a third note with the same file name silently replaced the second.
+- Retrieval no longer walks and hashes the whole repository to add code symbols. The code graph parses only the active paths and caches each file by its stat identity; the whole-repository projection prunes ignored directories and re-parses only changed files. In a 6,700-file repository the first retrieval after an edit fell from 48–51 s to 0.3 s. (The earlier performance figures used a vault with no code repository and did not cover this.)
+- Runtime logs rotate at 5 MB and `kb stats` reads only their tail; the embedding cache drops vectors for notes that no longer exist and is written atomically; heal backups and rolled-back files, which keep unredacted originals, expire after 30 days.
+- Mermaid graph output is deterministic; CLI leases require a distinct `--agent`/`KB_AGENT`; exact-path search treats `%` and `_` literally.
+- Design docs no longer describe allowlisted command validators, learned ranking, or feedback/outcomes under `.kb/` as current behavior; `docs/schema.md` states the repository-identity requirement and gives a `validity` example that passes schema validation.
 
 ### Breaking
 

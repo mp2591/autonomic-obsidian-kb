@@ -162,7 +162,7 @@ kb merge <target-id> <source-id>... --reason "one note instead of three overlapp
 kb split <source-id> <part-id> <part-id>... --reason "separate build and deploy procedures"
 ```
 
-Promotion, and activation of a supersede/merge/split replacement, refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` let the caller vouch for its own candidate, so each requires `--reason` and is recorded in the ledger; set `[security] allow_privileged_remember = false` to require reviewer promotion for everything.
+Promotion, and activation of a supersede/merge/split replacement, refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` let the caller vouch for its own candidate, so each requires `--reason` and is recorded in the ledger. Promotion scores are heuristics over caller-supplied evidence (any CLI caller can add evidence, including `evaluation` evidence), and imported candidates (`kb learn --file`, MCP) cannot set their own value estimates. Set `[security] allow_privileged_remember = false` to require review for every candidate: the privileged options are refused and nothing from `remember`, `learn`, `consolidate`, or MCP activates until a reviewer runs `kb promote`.
 
 ## Feedback and outcome learning
 
@@ -211,11 +211,11 @@ kb revalidate <memory-id> --reason "re-read index.py; ownership rule unchanged"
 ## Multi-agent coordination
 
 ```bash
-kb lease acquire "investigate index deadlock" --ttl 30
-kb lease release "investigate index deadlock"
+kb --agent codex-1 lease acquire "investigate index deadlock" --ttl 30
+kb --agent codex-1 lease release "investigate index deadlock"
 ```
 
-Leases are ephemeral coordination, not semantic knowledge.
+Leases are ephemeral coordination, not semantic knowledge. Each agent needs its own identity (`--agent` or `KB_AGENT`); the default `generic` identity is refused so agents cannot release each other's leases.
 
 ## Retrieval experiments
 

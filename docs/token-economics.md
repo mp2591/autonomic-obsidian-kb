@@ -24,6 +24,6 @@ A short but unreliable memory can be more expensive than a longer verified one b
 - paired no-KB versus KB task outcomes;
 - shadow-route comparisons and rank-example feedback.
 
-`kb outcome`, `kb benchmark --traces`, `kb replay`, `kb shadow`, and `kb calibrate` provide the measurement/control path. Frequency of retrieval is not treated as truth. Incorrect, stale, correction-causing or unsafe memories contribute negative labels.
+`kb outcome`, `kb benchmark --traces`, `kb replay`, and `kb shadow` provide the measurement path; `kb calibrate` reports that learned ranking is disabled in this release. Frequency of retrieval is not treated as truth. Incorrect, stale, correction-causing or unsafe feedback is recorded as negative labels for offline evaluation.
 
 A new default feature must improve success or preserve success while lowering total cost, with bounded false-context and safety rates.
