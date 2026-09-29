@@ -50,8 +50,13 @@ class BenchmarkRunner:
             total_corpus_tokens = sum(max(1, int(note["token_cost"])) for note in corpus)
             for case in tasks:
                 budget = int(case.get("budget", self.config.default_budget))
+                # Uncommitted work in the checkout must not change a regression benchmark.
                 manifest = retriever.retrieve(
-                    str(case["task"]), budget=budget, paths=list(case.get("paths", [])), agent="benchmark"
+                    str(case["task"]),
+                    budget=budget,
+                    paths=list(case.get("paths", [])),
+                    agent="benchmark",
+                    use_worktree=False,
                 )
                 expected = list(case.get("expected_ids", []))
                 retrieved = [item.id for item in manifest.items]

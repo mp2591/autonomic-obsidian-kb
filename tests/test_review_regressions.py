@@ -17,10 +17,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autonomic_kb import __version__
-from autonomic_kb.benchmark import compare_to_reference
+from autonomic_kb.benchmark import BenchmarkRunner, compare_to_reference
 from autonomic_kb.cli import main
 from autonomic_kb.config import KBConfig
 from autonomic_kb.evidence import EvidenceStore, OperationLedger
+from autonomic_kb.git_context import GitContext
 from autonomic_kb.healing import Compactor, Healer, forget
 from autonomic_kb.index import KnowledgeIndex
 from autonomic_kb.learning import Learner, LearningCandidate
@@ -517,6 +518,27 @@ class InterfaceTests(unittest.TestCase):
             validator.close()
         self.assertIn("validator-repository-unavailable", codes)
         self.assertNotIn("validator-path-escape", codes)
+
+    def test_benchmark_ignores_uncommitted_worktree_changes(self):
+        identity = "kb:repository:command:t"
+        write_memory(self.config, "cmd.md", identity, "Test", "run the unit tests", memory_type="command")
+        tasks = Path(self.temporary.name) / "tasks.json"
+        tasks.write_text(json.dumps([{"name": "t", "task": "run the unit tests", "expected_ids": [identity]}]))
+        dirty = GitContext(root="/tmp/demo", changed_paths=["src/uncommitted.py"])
+        seen: list[list[str]] = []
+        original = Retriever.build_context
+
+        def spy(retriever, *args, **kwargs):
+            context = original(retriever, *args, **kwargs)
+            seen.append(list(context.changed_paths))
+            return context
+
+        with (
+            patch("autonomic_kb.retrieval.inspect_git", return_value=dirty),
+            patch.object(Retriever, "build_context", spy),
+        ):
+            BenchmarkRunner(self.config).run(tasks)
+        self.assertEqual(seen, [[]])
 
     def test_benchmark_comparison_flags_regressions_not_improvements(self):
         reference = {

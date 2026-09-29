@@ -75,13 +75,21 @@ class Retriever:
             self.index.close()
 
     def build_context(
-        self, task: str, requested_paths: list[str] | None = None, agent: str = "generic", session: str = ""
+        self,
+        task: str,
+        requested_paths: list[str] | None = None,
+        agent: str = "generic",
+        session: str = "",
+        *,
+        use_worktree: bool = True,
     ) -> TaskContext:
         git = inspect_git(self.config.repo)
         repo_name = Path(git.root).name if git.root else (self.config.repo.name if self.config.repo else "")
         paths = requested_paths or []
         module = Path(paths[0]).parts[0] if paths and Path(paths[0]).parts else ""
-        active_paths = paths + git.changed_paths
+        # Uncommitted changes steer ordinary retrieval; reproducible evaluation excludes them.
+        changed_paths = git.changed_paths if use_worktree else []
+        active_paths = paths + changed_paths
         symbols = self.code_graph.symbols_for_paths(active_paths[:20]) if self.code_graph and active_paths else []
         return TaskContext(
             task=task,
@@ -93,7 +101,7 @@ class Retriever:
             branch=git.branch,
             head=git.head,
             merge_base=git.merge_base,
-            changed_paths=git.changed_paths,
+            changed_paths=changed_paths,
             requested_paths=paths,
             changed_symbols=symbols[:40],
             agent=agent,
@@ -154,13 +162,14 @@ class Retriever:
         at: str = "",
         versions: dict[str, str] | None = None,
         record: bool = True,
+        use_worktree: bool = True,
     ) -> RetrievalManifest:
         reject_secrets(task)
         budget = self.config.default_budget if budget is None else int(budget)
         if budget < 80:
             raise ValueError("budget must be at least 80; it is never silently increased")
         self.index.index_vault()
-        context = self.build_context(task, paths, agent, session)
+        context = self.build_context(task, paths, agent, session, use_worktree=use_worktree)
         plan = build_query_plan(context)
         context.requested_paths = plan.paths
         context.at = at or requested_time(task)
