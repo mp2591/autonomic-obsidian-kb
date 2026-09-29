@@ -470,6 +470,25 @@ class RetrievalBehaviorTests(unittest.TestCase):
         self.assertIn("verification", manifest.unrecorded_evidence)
         self.assertIn("not recorded", manifest.to_markdown())
 
+    def test_final_budget_reduces_a_layer_before_dropping_the_memory(self):
+        quoted = " ".join(f'"option-{number}" = "value {number}"' for number in range(40))
+        path = write_memory(
+            self.config,
+            "cmd.md",
+            "kb:repository:command:quoted",
+            "Quoted command",
+            "Run make quoted to regenerate the quoted configuration",
+            memory_type="command",
+        )
+        text = path.read_text()
+        path.write_text(text.replace("Additional summary context for the common path.", quoted))
+        with KnowledgeIndex(self.config) as index:
+            retriever = Retriever(self.config, index)
+            for budget in range(90, 400, 10):
+                manifest = retriever.retrieve("run make quoted configuration command", budget=budget, record=False)
+                self.assertTrue(manifest.items, f"budget {budget} delivered nothing")
+                self.assertLessEqual(manifest.used_tokens, budget)
+
     def test_query_plan_marks_only_explicit_temporal_intent(self):
         self.assertFalse(build_query_plan(TaskContext("run tests after the build")).temporal)
         self.assertTrue(build_query_plan(TaskContext("how did it work previously")).temporal)

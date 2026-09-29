@@ -267,9 +267,27 @@ class Retriever:
             remaining = budget - reserved
             items, remaining = self._allocate_set(scored, remaining, depth, context, decisions, excluded, agent)
             source_notes = {note["id"]: note for _, note, _ in scored}
-            for item in items:
+
+            def revise(item: RetrievalItem) -> None:
                 note = source_notes[item.id]
                 item.revision = sha256_text(stable_json([note["source_hash"], agent, item.layer, item.text]))
+
+            for item in items:
+                revise(item)
+
+            def shrink_last() -> bool:
+                """Re-compile the last item at a smaller complete layer instead of dropping it."""
+                item = items[-1]
+                current = TOKENIZERS.count(item.text, agent).tokens
+                for layer in range(item.layer - 1, -1, -1):
+                    found, text = compile_task_view(source_notes[item.id], context.task, layer, current - 1, agent)
+                    if text and found <= layer:
+                        item.layer, item.text = found, text.strip()
+                        item.tokens = TOKENIZERS.count(item.text, agent).tokens + 14
+                        item.reasons.append(f"reduced to L{found} to fit the final payload")
+                        revise(item)
+                        return True
+                return False
 
             def sufficiency():
                 selected = [dict(source_notes[item.id], delivered_text=item.text) for item in items]
@@ -308,6 +326,9 @@ class Retriever:
                 if manifest.label_missing and manifest.missing_evidence:
                     # The recorded/undelivered labels are advisory; drop them before any memory.
                     manifest.label_missing = False
+                    continue
+                if shrink_last():
+                    manifest.state, manifest.missing_evidence, manifest.unrecorded_evidence = sufficiency()
                     continue
                 removed = items.pop()
                 excluded.append({"id": removed.id, "path": removed.path, "reason": "final payload budget"})

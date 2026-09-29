@@ -1,3 +1,3 @@
 # Gemini CLI + autonomic-obsidian-kb
 
-Set `KB_VAULT`, pass the repository with `--repo`, and retrieve under a fixed budget before repeating repository exploration. Expand only when the manifest cannot answer the current step.
+Set `KB_VAULT`, pass the repository with `--repo`, and retrieve under a fixed budget before repeating repository exploration. Expand only when the manifest cannot answer the current step. Without `--repo`, `kb` uses `KB_REPO` or the Git worktree of the current directory.

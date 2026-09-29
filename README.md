@@ -24,7 +24,7 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 
 - **Obsidian Markdown remains human-readable semantic authority.**
 - **Content-addressed evidence objects** preserve source spans, observations, task episodes, test/command results, and corrections.
-- **Append-only memory operations** (`ADD`, `AMEND`, `SUPERSEDE`, `RETRACT`, `MERGE`, `SPLIT`, `REVALIDATE`, `QUARANTINE`, `ARCHIVE`) make semantic evolution auditable.
+- **Append-only memory operations** make semantic evolution auditable. Built-in commands emit `ADD`, `AMEND`, `SUPERSEDE`, `RETRACT`, `REVALIDATE`, `QUARANTINE`, and `ARCHIVE`; the ledger also accepts `MERGE`, `SPLIT`, and `NOOP` for external tooling, but no built-in command emits them yet.
 - **Schema v2** adds memory families, repository identity, explicit valid-time intervals and source applicability, provenance taint, evidence, validators, and instruction authorization while retaining legacy-v1 compatibility.
 - **Incremental indexing** skips unchanged Markdown by stat manifest; SQLite/FTS5 remains disposable.
 - **Deterministic task-aware retrieval routing** can choose no retrieval, exact+lexical, lexical, hybrid, or temporal paths.
@@ -34,7 +34,8 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 - **Task-planned context compilation** selects whole representations and preserves commands, preconditions, and verification without unsafe sentence splicing.
 - **Temporal, version, and source gates** check declared applicability; Git ancestry alone is not continuing validity.
 - **Non-executable validation** checks schema, evidence, file existence, and source hashes. Note-defined command execution is disabled.
-- **Transactional healing** restores semantic files and events on handled failures; interrupted journals fail closed pending reconciliation.
+- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, migrate) snapshot notes and events as hard links and restore them on handled failures; an in-place edit that makes rollback unfaithful, or an interrupted journal, fails closed pending reconciliation.
+- **Reviewer lifecycle** (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`) is the explicit gate between agent-submitted candidates and retrievable knowledge; it is CLI-only.
 - **Episodic capture and recurrence consolidation** prevent every observation from becoming canonical memory.
 - **Multi-agent leases** reduce duplicate investigations.
 - **Task traces, durable feedback/outcomes, isolated replay, and shadow policies** expose measurement without equating a proxy score with demonstrated avoided work.
@@ -116,6 +117,8 @@ export KB_VAULT=~/Knowledge/agent-memory
 kb doctor
 ```
 
+`kb` never guesses a vault: it uses `--vault`, `KB_VAULT`, or the nearest parent directory containing `kb.toml` or `.obsidian`, and otherwise stops with an error. Memories are scoped to the repository given by `--repo`, else `KB_REPO`, else the Git worktree containing the current directory; the vault's own location never supplies that identity. A repository-scoped memory without a recorded repository is excluded wherever a repository is active, and `kb validate` warns about it.
+
 Retrieve with a final-payload budget under the explicitly reported token counter:
 
 ```bash
@@ -148,6 +151,16 @@ kb episode \
 ```
 
 Consolidation can be recurrence-triggered or explicitly forced for a proven high-value episode.
+
+Candidates that do not clear the promotion threshold wait in the inbox, which retrieval ignores. The `remember` result reports the score, threshold, and reason. Review is explicit:
+
+```bash
+kb inbox                                            # candidates, scores, blockers
+kb promote <memory-id> --reason "checked against the code"
+kb supersede <old-id> <new-id> --reason "resolved the contradiction"
+```
+
+Promotion refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence.
 
 ## Feedback and outcome learning
 
@@ -184,6 +197,12 @@ kb heal --apply     # backup + apply + post-validation + rollback on regression
 
 Validator types include repository-contained file existence and source hashes. All note-defined command validators are rejected without execution, including formerly allowlisted commands.
 
+A memory created with `--source` records that file's digest. When the file changes, retrieval excludes the memory and `kb validate` reports `dependency-changed`, which `kb heal` lists as `require-revalidation`. After confirming the memory still holds, a reviewer rebinds it:
+
+```bash
+kb revalidate <memory-id> --reason "re-read index.py; ownership rule unchanged"
+```
+
 ## Multi-agent coordination
 
 ```bash
@@ -217,10 +236,14 @@ Core operation is headless filesystem/index based. The official Obsidian CLI rem
 ```bash
 python -m pip install -e '.[dev]'
 python -m compileall -q src scripts tests
+ruff check src scripts tests
 python -m unittest discover -s tests -v
 pytest
-python benchmarks/run.py
+python benchmarks/run.py                     # regression gate against benchmarks/results/reference.json
+python benchmarks/run.py --update-reference  # only with a deliberate retrieval change, in the same commit
 ```
+
+The benchmark writes `benchmarks/results/latest.json` and fails when expected coverage or precision falls, false context rises, or injected tokens grow beyond tolerance. It ignores uncommitted working-tree changes so a developer checkout and CI see the same results.
 
 ## Design rule
 

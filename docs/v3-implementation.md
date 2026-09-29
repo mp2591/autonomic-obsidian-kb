@@ -92,10 +92,14 @@ python -m compileall -q src scripts tests
 ruff check src scripts tests
 python -m unittest discover -s tests -v
 python -m pytest -q
-python benchmarks/run.py --output /tmp/kb-proxy.json
+python benchmarks/run.py   # regression gate against benchmarks/results/reference.json
 python -m pip wheel --no-deps --wheel-dir dist .
 ```
 
 CI repeats core checks on Python 3.11, 3.12, and 3.13. A separate offline-network container downloads and verifies the pinned official Obsidian AppImage during setup, starts the actual application with `--ozone-platform=headless`, and checks CLI, filesystem, metadata, graph, and rendering interoperability. No stub stands in for the application.
 
 Do not merge while any of these checks fail. GitHub-enforced branch protection is a separate repository setting; a workflow alone does not prevent an administrator from merging a failing PR. A release report must identify the tested commit/tree and actual CI conclusion. Local unit success alone is not real-Obsidian certification.
+
+## Changes after 0.3.0
+
+The September 2026 repository review found defects in repository scoping, secret scanning, transaction cost, duplicate identities, compaction, source invalidation, routing, and benchmark gating. The fixes, new reviewer commands, and measured effects are listed under "Unreleased" in the [changelog](../CHANGELOG.md), and each defect has a reproduction in `tests/test_review_regressions.py`.

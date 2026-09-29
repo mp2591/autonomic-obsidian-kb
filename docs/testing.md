@@ -6,7 +6,11 @@ CI has two independent release gates.
 
 Python 3.11, 3.12 and 3.13 install the package plus dev dependencies, compile sources/scripts/tests, run `unittest`, run `pytest`, execute CLI indexing/retrieval smoke tests and enforce the deterministic benchmark guardrail.
 
-The current v2 suite contains 52 discovered tests. V2 tests cover evidence integrity, operation concurrency, incremental indexing, adaptive/no-retrieval routing, RRF, hard scope and temporal gates, outcome-calibrated ranking, task leases, schema/validation/healing, adversarial persistence and legacy API compatibility.
+The suite contains 144 discovered tests. They cover evidence integrity, operation concurrency, incremental indexing, adaptive/no-retrieval routing, RRF, hard scope and temporal gates, task leases, schema/validation/healing, adversarial persistence and legacy API compatibility. `tests/test_review_regressions.py` reproduces each defect fixed after the September 2026 review: repository identity leaks, whole-vault secret scanning, escaped-newline secrets, duplicate-identity takeover, compaction ignoring usage, silent source invalidation, transaction rollback fidelity, temporal over-routing, and benchmark determinism.
+
+Tests never discover the repository that contains the working directory: `tests/support.make_vault` binds each vault to an empty non-Git directory unless a test supplies one.
+
+The benchmark step fails on regressions against `benchmarks/results/reference.json`; see [benchmark design](benchmark.md).
 
 ## Real Obsidian desktop + official CLI
 
