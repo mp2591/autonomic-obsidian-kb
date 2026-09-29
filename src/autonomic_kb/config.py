@@ -121,9 +121,19 @@ class KBConfig:
             path.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def load(cls, vault: str | Path | None = None, repo: str | Path | None = None) -> KBConfig:
+    def load(
+        cls, vault: str | Path | None = None, repo: str | Path | None = None, *, discover_repo: bool = True
+    ) -> KBConfig:
+        """Load a vault and the repository that scopes its memories.
+
+        The repository is ``repo``, else ``KB_REPO``, else the Git worktree containing the
+        current directory. It is never inferred from the vault's own location: a vault kept
+        in Git would otherwise give every project the vault's identity, and a vault outside
+        Git would give memories no identity at all. ``discover_repo=False`` means "no
+        repository context".
+        """
         vault_path = find_vault(vault)
-        repo_path = Path(repo).expanduser().resolve() if repo else find_repo(vault_path)
+        repo_path = resolve_repo(repo, discover=discover_repo)
         raw: dict[str, Any] = {}
         config_path = vault_path / "kb.toml"
         if config_path.exists():
@@ -165,14 +175,22 @@ class KBConfig:
 
 
 def find_vault(value: str | Path | None = None) -> Path:
+    """Locate an existing vault; never fall back to an arbitrary working directory.
+
+    Falling back to the current directory made read-only commands create KB state
+    directories wherever they happened to run.
+    """
     explicit = value or os.environ.get("KB_VAULT")
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        path = Path(explicit).expanduser().resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"vault does not exist: {path}; create it with `kb init {explicit}`")
+        return path
     current = Path.cwd().resolve()
     for candidate in (current, *current.parents):
         if (candidate / "kb.toml").exists() or (candidate / ".obsidian").exists():
             return candidate
-    return current
+    raise FileNotFoundError("no vault found: pass --vault, set KB_VAULT, or run `kb init <path>`")
 
 
 def find_repo(start: Path) -> Path | None:
@@ -181,6 +199,13 @@ def find_repo(start: Path) -> Path | None:
         if (candidate / ".git").exists():
             return candidate
     return None
+
+
+def resolve_repo(value: str | Path | None = None, *, discover: bool = True) -> Path | None:
+    explicit = value or os.environ.get("KB_REPO")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return find_repo(Path.cwd()) if discover else None
 
 
 def initialize_vault(path: str | Path, force: bool = False) -> KBConfig:

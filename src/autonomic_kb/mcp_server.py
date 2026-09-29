@@ -9,6 +9,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from . import __version__
 from .config import KBConfig
 from .context_state import ContextStateStore
 from .evidence import EvidenceStore
@@ -232,7 +233,7 @@ class MCPServer:
                         "tools": {"listChanged": False},
                         "resources": {"subscribe": False, "listChanged": False},
                     },
-                    "serverInfo": {"name": "autonomic-obsidian-kb", "version": "0.3.0"},
+                    "serverInfo": {"name": "autonomic-obsidian-kb", "version": __version__},
                 },
             )
         if method == "tools/list":
@@ -257,16 +258,15 @@ class MCPServer:
                 return self._error(request_id, -32000, str(error))
         if method == "tools/call":
             params = request.get("params", {})
+            name = str(params.get("name", ""))
+            if name not in {tool["name"] for tool in self.tools()}:
+                return self._error(request_id, -32602, f"unknown tool: {name}")
             try:
-                value = self.call_tool(str(params.get("name", "")), dict(params.get("arguments", {})))
-                return self._result(
-                    request_id,
-                    {
-                        "content": [{"type": "text", "text": stable_json(value)}],
-                    },
-                )
+                value = self.call_tool(name, dict(params.get("arguments", {})))
             except Exception as error:
-                return self._error(request_id, -32000, str(error))
+                # Tool failures are results the model can read and correct, not protocol errors.
+                return self._result(request_id, {"content": [{"type": "text", "text": str(error)}], "isError": True})
+            return self._result(request_id, {"content": [{"type": "text", "text": stable_json(value)}]})
         if method == "ping":
             return self._result(request_id, {})
         return self._error(request_id, -32601, f"method not found: {method}")

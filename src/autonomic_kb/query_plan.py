@@ -11,7 +11,15 @@ _SYMBOL = re.compile(
     r"\b(?:[A-Z][A-Za-z0-9_]{2,}|[a-z_][a-z0-9_]{2,}\([^)]*\)|[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)\b"
 )
 _ERROR = re.compile(r"(?:error|exception|failed|failure|traceback|locked|timeout)[:\s]+([^\n]{3,160})", re.I)
-_TEMPORAL = re.compile(r"\b(as of|before|after|previous|old|version|release|branch|commit|historical)\b", re.I)
+# Only explicit historical intent routes temporally. Bare "after", "before", "version" or
+# "commit" appear in ordinary tasks ("fails after rebuild") and must not change the route.
+TEMPORAL_INTENT = re.compile(
+    r"\b(?:as of|previously|historical(?:ly)?|history of|at the time|used to"
+    r"|(?:previous|prior|older|earlier|old) (?:version|release|behaviou?r|value|default|api)s?"
+    r"|(?:before|after|since|until|prior to|in) (?:version|release|tag|commit) \S+"
+    r"|(?:before|after|since|until|prior to) v?\d+(?:\.\d+)+)",
+    re.I,
+)
 
 
 @dataclass(slots=True)
@@ -51,4 +59,5 @@ def build_query_plan(context: TaskContext) -> QueryPlan:
         subgoals = ["preconditions", "command or steps", "postcondition"]
     elif intent == "explain":
         subgoals = ["decision", "rationale", "constraints"]
-    return QueryPlan(intent, types, identifiers, paths, errors, bool(_TEMPORAL.search(task)), subgoals)
+    temporal = bool(context.at or TEMPORAL_INTENT.search(task))
+    return QueryPlan(intent, types, identifiers, paths, errors, temporal, subgoals)

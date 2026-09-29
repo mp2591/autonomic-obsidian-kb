@@ -57,3 +57,27 @@ def assess_sufficiency(context: TaskContext, selected_notes: list[dict[str, Any]
     if not selected_notes:
         return "insufficient_evidence", sorted(required)
     return ("partial_context", missing) if missing else ("sufficient_context", [])
+
+
+def recorded_roles(note: dict[str, Any]) -> set[str]:
+    """Roles the note could supply if it were delivered in full."""
+    metadata = note.get("metadata", {})
+    parts = [str(note.get(f"l{level}") or "") for level in range(5)] + [str(note.get("summary") or "")]
+    for field in ("verification", "rationale"):
+        value = metadata.get(field)
+        if isinstance(value, str):
+            parts.append(value)
+    conditions = metadata.get("preconditions", [])
+    if isinstance(conditions, str):
+        conditions = [conditions]
+    if isinstance(conditions, list):
+        parts.extend(str(value) for value in conditions)
+    return evidence_roles(dict(note, delivered_text="\n".join(parts)))
+
+
+def unrecorded_roles(missing: list[str], selected_notes: list[dict[str, Any]]) -> list[str]:
+    """Missing roles no selected memory records; expanding the delivered notes cannot supply them."""
+    if not selected_notes:
+        return []
+    available = set().union(*(recorded_roles(note) for note in selected_notes))
+    return [role for role in missing if role not in available]

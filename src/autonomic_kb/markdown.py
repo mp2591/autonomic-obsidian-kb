@@ -13,6 +13,9 @@ try:
 except ImportError:  # pragma: no cover
     yaml = None
 
+# libyaml's loader is an order of magnitude faster and equally restricted to safe types.
+_YAML_LOADER = (getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader) if yaml is not None else None
+
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 _LAYER = re.compile(r"^##\s+L([0-4])(?:\s*[-—:]\s*|\s+)(.*)$", re.MULTILINE | re.IGNORECASE)
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
@@ -58,7 +61,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     raw = match.group(1)
     if yaml is not None:
         try:
-            loaded = yaml.safe_load(raw)
+            loaded = yaml.load(raw, Loader=_YAML_LOADER)
             if isinstance(loaded, dict):
                 # YAML dates are a native Obsidian property type. Canonicalize them
                 # before schema validation; reject cycles/non-finite scalar data.

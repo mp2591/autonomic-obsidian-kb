@@ -16,7 +16,7 @@
     "task": "What exact command runs the complete test suite?",
     "budget": 150,
     "paths": [
-      "tests/test_cli.py"
+      "tests/test_cli_mcp_benchmark.py"
     ],
     "expected_ids": [
       "kb:repository:command:test-suite"

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import fnmatch
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .models import TaskContext
 from .security import trust_gate
-from .util import age_days, jaccard, terms
+from .util import age_days, jaccard
 
-POLICY_VERSION = "rank-v2.1"
+# The fixed ranking policy reported in explanations; calibration.RankPolicy uses the same label.
+POLICY_VERSION = "rank-v3-static"
 TYPE_TERMS = {
     "architecture": {"architecture", "design", "component", "boundary", "structure", "why"},
     "repository-map": {"repository", "repo", "where", "file", "module", "layout", "orient"},
@@ -27,6 +28,9 @@ TYPE_TERMS = {
     "negative-result": {"failed", "didn't", "doesn't", "avoid", "dead end", "negative"},
 }
 
+REPOSITORY_BOUND_SCOPES = {"repository", "project", "module", "branch"}
+GENERIC_STEMS = {"__init__", "__main__", "readme"}
+
 AUTHORITY = {
     "source-of-truth": 1.0,
     "authoritative": 0.95,
@@ -39,11 +43,17 @@ AUTHORITY = {
 }
 
 
+_CLUE_WORD = re.compile(r"[a-z0-9]+(?:'[a-z]+)?")
+
+
 def classify_task(task: str) -> list[str]:
-    task_terms = set(terms(task))
+    # Retrieval stop words ("where", "what") are informative clues here, and contractions
+    # such as "didn't" must survive tokenization.
+    lowered = task.lower().replace("\u2019", "'")
+    task_terms = set(_CLUE_WORD.findall(lowered))
     scored: list[tuple[int, str]] = []
     for memory_type, clues in TYPE_TERMS.items():
-        overlap = len(task_terms & clues)
+        overlap = sum(1 for clue in clues if (clue in lowered if " " in clue else clue in task_terms))
         if overlap:
             scored.append((overlap, memory_type))
     scored.sort(key=lambda value: (-value[0], value[1]))
@@ -61,11 +71,20 @@ def classify_risk(task: str) -> str:
     return "normal"
 
 
+def _normalize_path(value: str) -> str:
+    """Drop a leading ``./`` or ``/``; unlike ``lstrip("./")`` this keeps ``.github``."""
+    value = value.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return value.lstrip("/")
+
+
 def _matches_path(pattern: str, paths: list[str]) -> bool:
-    normalized = pattern.replace("\\", "/").lstrip("./")
+    normalized = _normalize_path(pattern)
+    prefix = normalized.rstrip("*/")
     return any(
-        fnmatch.fnmatch(path.replace("\\", "/").lstrip("./"), normalized)
-        or path.replace("\\", "/").lstrip("./").startswith(normalized.rstrip("*/") + "/")
+        fnmatch.fnmatch(_normalize_path(path), normalized)
+        or (bool(prefix) and _normalize_path(path).startswith(prefix + "/"))
         for path in paths
     )
 
@@ -89,13 +108,22 @@ def scope_gate(note: dict[str, Any], context: TaskContext, allow_cross_repo: boo
         return True, "global scope", 0.52
     if scope == "user":
         return True, "user scope", 0.6
+    if (
+        scope in REPOSITORY_BOUND_SCOPES
+        and not note_repo_id
+        and not note_repo
+        and context.repository_id
+        and not allow_cross_repo
+    ):
+        # An unbound memory would otherwise apply to every repository on the machine.
+        return False, "repository-scoped memory has no repository identity", 0.0
     if note_repo_id and note_repo_id != context.repository_id and not allow_cross_repo:
         return False, "repository identity mismatch", 0.0
     if (
         not note_repo_id
         and note_repo
         and context.repo
-        and note_repo not in {context.repo, Path(context.repo).name}
+        and note_repo not in _legacy_repository_names(context)
         and not allow_cross_repo
     ):
         return False, f"legacy repo scope mismatch ({note_repo} != {context.repo})", 0.0
@@ -126,6 +154,14 @@ def scope_gate(note: dict[str, Any], context: TaskContext, allow_cross_repo: boo
     return False, f"unknown scope {scope}", 0.0
 
 
+def _legacy_repository_names(context: TaskContext) -> set[str]:
+    """Names a legacy ``repo:`` field may use: the checkout directory or the remote's repository."""
+    names = {context.repo, Path(context.repo).name}
+    if context.repository_id.startswith("git:"):
+        names.add(context.repository_id.rstrip("/").rsplit("/", 1)[-1])
+    return names
+
+
 def feature_vector(note: dict[str, Any], context: TaskContext, repo_path: Path | None = None) -> dict[str, float]:
     task_types = set(context.task_types)
     active_paths = context.requested_paths + context.changed_paths
@@ -139,8 +175,12 @@ def feature_vector(note: dict[str, Any], context: TaskContext, repo_path: Path |
             path_score = 1.0
             break
     if not path_score and active_paths:
-        note_path = str(note.get("path", ""))
-        if any(Path(path).stem and Path(path).stem in note_path for path in active_paths):
+        # Whole path components only: ``index.py`` must not match ``00-index/…`` or ``cli`` ``client``.
+        note_parts = set(PurePosixPath(_normalize_path(str(note.get("path", "")))).with_suffix("").parts)
+        if any(
+            Path(path).stem and Path(path).stem.lower() not in GENERIC_STEMS and Path(path).stem in note_parts
+            for path in active_paths
+        ):
             path_score = 0.65
     validation = str(metadata.get("validation", note.get("freshness", "unknown")))
     validation_score = {

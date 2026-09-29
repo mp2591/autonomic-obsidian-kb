@@ -13,7 +13,8 @@ SOURCE_ID = "kb:repository:architecture:obsidian-contract-source"
 
 
 def verify_kb_index_and_retrieval(vault: Path, report: IntegrationReport) -> KBConfig:
-    config = KBConfig.load(vault)
+    # The fixture is a standalone vault; do not bind it to the checkout the tests run from.
+    config = KBConfig.load(vault, discover_repo=False)
     with KnowledgeIndex(config) as index:
         stats = index.rebuild()
         if stats.malformed:

@@ -6,7 +6,7 @@ from typing import Any
 from .config import KBConfig
 from .markdown import dump_frontmatter, parse_markdown
 from .models import TYPE_KIND
-from .storage import semantic_transaction
+from .storage import semantic_transaction, vault_markdown_paths
 from .util import atomic_write, utc_now
 
 
@@ -43,14 +43,9 @@ def migrate_metadata(metadata: dict[str, Any]) -> tuple[dict[str, Any], list[str
 
 def migrate_vault(config: KBConfig, apply: bool = False) -> dict[str, Any]:
     results = []
-    ignored = {".git", ".obsidian", ".kb", ".kb-evidence", ".kb-memory-events", ".kb-episodes", ".venv"}
     with semantic_transaction(config.vault) if apply else nullcontext():
-        for path in config.vault.rglob("*.md"):
+        for path in list(vault_markdown_paths(config.vault)):
             relative = path.relative_to(config.vault)
-            if any(part in ignored for part in relative.parts):
-                continue
-            if path.is_symlink() or not path.resolve().is_relative_to(config.vault.resolve()):
-                continue
             text = path.read_text(encoding="utf-8")
             parsed = parse_markdown(text)
             metadata, changed = migrate_metadata(parsed.metadata)

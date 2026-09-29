@@ -22,13 +22,10 @@ from .read_policy import conflicting_claim_ids, memory_read_gate
 from .scoring import classify_risk, classify_task, feature_vector, score_note
 from .security import reject_secrets
 from .semantic import LocalEmbeddingBackend
-from .sufficiency import assess_sufficiency
+from .sufficiency import assess_sufficiency, unrecorded_roles
 from .tokenizer import TOKENIZERS
 from .util import atomic_write, jaccard, sha256_text, stable_json, terms
 
-_TEMPORAL = re.compile(
-    r"\b(previous|old|older|before|after|as of|version|release|branch|commit|historical|then)\b", re.I
-)
 _EXACTISH = re.compile(
     r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+|\b[A-Z][A-Za-z0-9_]{2,}\b|\b[a-z_][a-z0-9_]*\([^)]*\)|\b\w+\.\w+\b)"
 )
@@ -80,7 +77,7 @@ class Retriever:
     def build_context(
         self, task: str, requested_paths: list[str] | None = None, agent: str = "generic", session: str = ""
     ) -> TaskContext:
-        git = inspect_git(self.config.repo or Path.cwd())
+        git = inspect_git(self.config.repo)
         repo_name = Path(git.root).name if git.root else (self.config.repo.name if self.config.repo else "")
         paths = requested_paths or []
         module = Path(paths[0]).parts[0] if paths and Path(paths[0]).parts else ""
@@ -109,7 +106,7 @@ class Retriever:
         stripped = context.task.strip()
         if (not terms(stripped) or stripped.lower() in {"hello", "hi", "thanks"}) and not context.requested_paths:
             return "none"
-        if _TEMPORAL.search(stripped):
+        if build_query_plan(context).temporal:
             return "temporal"
         if _EXACTISH.search(stripped) or context.requested_paths:
             return "exact+lexical"
@@ -121,7 +118,7 @@ class Retriever:
         sets: dict[str, list[dict[str, Any]]] = {}
         if route == "none":
             return sets
-        if "exact" in route or route == "hybrid":
+        if "exact" in route or route in {"hybrid", "temporal"}:
             plan = build_query_plan(context)
             sets["exact"] = self.index.search_exact(context.task, min(40, self.config.max_candidates))
             for identifier in plan.identifiers:
@@ -258,11 +255,12 @@ class Retriever:
 
             def sufficiency():
                 selected = [dict(source_notes[item.id], delivered_text=item.text) for item in items]
-                return assess_sufficiency(context, selected)
+                state, missing = assess_sufficiency(context, selected)
+                return state, missing, unrecorded_roles(missing, selected)
 
-            state, missing = sufficiency()
+            state, missing, unrecorded = sufficiency()
             if route == "none":
-                state, missing = "no_retrieval_needed", []
+                state, missing, unrecorded = "no_retrieval_needed", [], []
             elif not items and any("contradiction" in str(row["reason"]) for row in excluded):
                 state = "conflicting_evidence"
             manifest = RetrievalManifest(
@@ -278,6 +276,7 @@ class Retriever:
                 trace_id=trace_id,
                 missing_evidence=missing,
                 token_count_exact=TOKENIZERS.count("", agent).exact,
+                unrecorded_evidence=unrecorded,
             )
 
             # Bound both emitted representations, never the diagnostic manifest.
@@ -288,12 +287,17 @@ class Retriever:
                 )
 
             while items and delivered_cost() > budget:
+                if manifest.label_missing and manifest.missing_evidence:
+                    # The recorded/undelivered labels are advisory; drop them before any memory.
+                    manifest.label_missing = False
+                    continue
                 removed = items.pop()
-                excluded.append({"id": removed.id, "reason": "final payload budget"})
-                manifest.state, manifest.missing_evidence = sufficiency()
+                excluded.append({"id": removed.id, "path": removed.path, "reason": "final payload budget"})
+                manifest.state, manifest.missing_evidence, manifest.unrecorded_evidence = sufficiency()
             if delivered_cost() > budget:
                 manifest.delivery = "Insufficient budget for context."
             manifest.used_tokens = delivered_cost()
+            manifest.excluded = excluded[:80]
             if manifest.used_tokens > budget:
                 raise ValueError("budget cannot fit the minimum response with this tokenizer")
             delivered_items = list(items)
@@ -303,6 +307,7 @@ class Retriever:
                 manifest.items = [item for item in items if previous.revisions.get(item.id) != item.revision]
                 if delivered_items and not manifest.items:
                     manifest.state, manifest.missing_evidence = "unchanged_context", []
+                    manifest.unrecorded_evidence = []
                 manifest.used_tokens = delivered_cost()
             # Trace data is not injected. A receipt records the selected representation
             # and source revision for acknowledgement and action-time checks.
@@ -429,7 +434,7 @@ class Retriever:
         return items, remaining
 
     def context(self, budget: int | None = None, agent: str = "generic") -> RetrievalManifest:
-        git = inspect_git(self.config.repo or Path.cwd())
+        git = inspect_git(self.config.repo)
         changed = ", ".join(git.changed_paths[:10]) or "current repository"
         task = f"Orient {agent} to {Path(git.root).name if git.root else 'the project'}; active paths: {changed}"
         return self.retrieve(task, budget=budget, paths=git.changed_paths[:20], agent=agent)

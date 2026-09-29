@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .benchmark import BenchmarkRunner, TraceBenchmarkRunner
+from .benchmark import BenchmarkRunner, TraceBenchmarkRunner, compare_to_reference
 from .config import KBConfig, initialize_vault
 from .dashboard import dashboard_data
 from .evidence import EvidenceStore
@@ -22,10 +22,14 @@ from .healing import Compactor, Healer, forget
 from .index import KnowledgeIndex
 from .learning import Learner, LearningCandidate
 from .leases import LeaseStore
+from .lifecycle import Lifecycle
 from .mcp_server import serve
 from .migrations import migrate_vault
+from .models import VALID_SCOPES, VALID_TYPES
 from .obsidian import ObsidianBridge
 from .retrieval import Retriever
+from .scoring import AUTHORITY
+from .security import TAINT_ORDER
 from .shadow import ShadowEvaluator
 from .telemetry import TaskOutcome, TelemetryStore
 from .util import sha256_text, utc_now
@@ -90,10 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("--title", {"required": True}),
         ("--summary", {"required": True}),
         ("--detail", {"default": ""}),
-        ("--type", {"default": "fact", "dest": "memory_type"}),
-        ("--scope", {"default": "repository"}),
-        ("--authority", {"default": "agent"}),
-        ("--taint", {"default": "agent"}),
+        ("--type", {"default": "fact", "dest": "memory_type", "choices": sorted(VALID_TYPES)}),
+        ("--scope", {"default": "repository", "choices": sorted(VALID_SCOPES)}),
+        ("--authority", {"default": "agent", "choices": sorted(AUTHORITY)}),
+        ("--taint", {"default": "agent", "choices": sorted(TAINT_ORDER)}),
         ("--claim-key", {"default": ""}),
         ("--claim-value", {"default": None}),
         ("--valid-from", {"default": ""}),
@@ -132,6 +136,17 @@ def build_parser() -> argparse.ArgumentParser:
     consolidate.add_argument("--force", action="store_true")
 
     commands.add_parser("validate")
+    commands.add_parser("inbox", help="list candidates awaiting review and why they were not promoted")
+    promote = commands.add_parser("promote", help="reviewer: activate an inbox memory")
+    promote.add_argument("id")
+    promote.add_argument("--reason", required=True)
+    revalidate = commands.add_parser("revalidate", help="reviewer: confirm a memory against current sources")
+    revalidate.add_argument("id")
+    revalidate.add_argument("--reason", required=True)
+    supersede = commands.add_parser("supersede", help="reviewer: retire OLD in favor of NEW")
+    supersede.add_argument("old_id")
+    supersede.add_argument("new_id")
+    supersede.add_argument("--reason", required=True)
     queue = commands.add_parser("validation-queue")
     queue.add_argument("--limit", type=int, default=20)
     heal = commands.add_parser("heal")
@@ -160,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark = commands.add_parser("benchmark")
     benchmark.add_argument("--tasks", default="benchmarks/tasks.json")
     benchmark.add_argument("--output")
+    benchmark.add_argument("--reference", help="fail when results regress against this reference result")
     benchmark.add_argument("--traces", action="store_true")
     obsidian = commands.add_parser("obsidian")
     obsidian.add_argument("--capabilities", action="store_true")
@@ -395,6 +411,22 @@ def main(argv: list[str] | None = None) -> int:
                 validator.close()
             _emit(report, args.json)
             return 1 if report.errors else 0
+        if args.command in {"inbox", "promote", "revalidate", "supersede"}:
+            lifecycle = Lifecycle(config)
+            actor = f"cli:{args.agent}"
+            try:
+                if args.command == "inbox":
+                    result = lifecycle.inbox()
+                elif args.command == "promote":
+                    result = lifecycle.promote(args.id, reason=args.reason, actor=actor)
+                elif args.command == "revalidate":
+                    result = lifecycle.revalidate(args.id, reason=args.reason, actor=actor)
+                else:
+                    result = lifecycle.supersede(args.old_id, args.new_id, reason=args.reason, actor=actor)
+            finally:
+                lifecycle.close()
+            _emit(result, args.json)
+            return 0
         if args.command == "validation-queue":
             validator = Validator(config)
             try:
@@ -469,8 +501,13 @@ def main(argv: list[str] | None = None) -> int:
             result = TraceBenchmarkRunner(config).run() if args.traces else BenchmarkRunner(config).run(args.tasks)
             if args.output:
                 Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            regressions: list[str] = []
+            if args.reference and not args.traces:
+                reference = json.loads(Path(args.reference).read_text(encoding="utf-8"))
+                regressions = compare_to_reference(result, reference)
+                result["regressions"] = regressions
             _emit(result, args.json)
-            return 0
+            return 1 if regressions else 0
         if args.command == "obsidian":
             bridge = ObsidianBridge(config.vault)
             _emit(bridge.capabilities() if args.capabilities else bridge.status(), args.json)
@@ -480,7 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "evidence":
             store = EvidenceStore(config)
             if args.evidence_command == "add":
-                git = inspect_git(config.repo or config.vault)
+                git = inspect_git(config.repo)
                 result = store.put(
                     args.kind,
                     args.content,
@@ -585,8 +622,8 @@ def _create_starter_note(config: KBConfig) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     now = utc_now()
     path.write_text(
-        "---\nschema_version: 2\nid: kb:repository:repository-map:knowledge-base\ntitle: Knowledge base map\n"
-        "kind: summary\ntype: repository-map\nscope: repository\nstatus: active\n"
+        "---\nschema_version: 2\nid: kb:global:repository-map:knowledge-base\ntitle: Knowledge base map\n"
+        "kind: summary\ntype: repository-map\nscope: global\nstatus: active\n"
         "summary: Entry point for the smallest useful project context.\n"
         "confidence: 0.8\nauthority: user-corrected\ntaint: trusted\n"
         f"created: {now}\nupdated: {now}\nfreshness: unvalidated\n"
@@ -603,7 +640,7 @@ def _create_starter_note(config: KBConfig) -> str:
 
 
 def _status(config: KBConfig) -> dict[str, Any]:
-    git = inspect_git(config.repo or config.vault)
+    git = inspect_git(config.repo)
     with KnowledgeIndex(config) as index:
         indexed = index.index_vault()
         stats = index.stats()

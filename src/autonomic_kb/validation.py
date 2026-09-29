@@ -8,13 +8,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .applicability import source_dependencies
 from .config import KBConfig
 from .evidence import EvidenceStore
 from .index import KnowledgeIndex
 from .markdown import parse_markdown
 from .models import VALID_KINDS, VALID_SCOPES, VALID_STATUSES, VALID_TYPES, ValidationIssue
+from .scoring import REPOSITORY_BOUND_SCOPES
 from .security import scan_content
+from .storage import vault_markdown_paths
 from .util import age_days, parse_time, sha256_file, utc_now
+
+INACTIVE_STATUSES = {"archived", "superseded", "retracted", "quarantined"}
 
 try:
     import jsonschema  # type: ignore
@@ -94,6 +99,19 @@ class ValidatorRegistry:
                 )
         return result
 
+    def _unavailable(self, metadata: dict[str, Any], spec: dict[str, Any], relative: str) -> list[ValidationIssue]:
+        return [
+            ValidationIssue(
+                "info",
+                "validator-repository-unavailable",
+                relative,
+                "No repository is configured, so this validator cannot run; pass --repo or set KB_REPO",
+                str(metadata.get("id", "")),
+                False,
+                spec,
+            )
+        ]
+
     def _safe_repo_path(self, value: str) -> Path | None:
         if not self.config.repo:
             return None
@@ -106,6 +124,8 @@ class ValidatorRegistry:
         return candidate
 
     def _file_exists(self, metadata: dict[str, Any], spec: dict[str, Any], relative: str) -> list[ValidationIssue]:
+        if not self.config.repo:
+            return self._unavailable(metadata, spec, relative)
         path = self._safe_repo_path(str(spec.get("path", "")))
         if not path:
             return [
@@ -134,6 +154,8 @@ class ValidatorRegistry:
         return []
 
     def _source_hash(self, metadata: dict[str, Any], spec: dict[str, Any], relative: str) -> list[ValidationIssue]:
+        if not self.config.repo:
+            return self._unavailable(metadata, spec, relative)
         path = self._safe_repo_path(str(spec.get("path", "")))
         expected = str(spec.get("sha256", ""))
         if not path:
@@ -194,7 +216,7 @@ class Validator:
         return json.loads(files("autonomic_kb").joinpath("data/memory.schema.json").read_text(encoding="utf-8"))
 
     def validate(self) -> ValidationReport:
-        self.index.index_vault(force=True)
+        self.index.index_vault()
         issues: list[ValidationIssue] = []
         notes: list[tuple[Path, dict[str, Any], str]] = []
         basename_map: dict[str, list[str]] = {}
@@ -213,6 +235,8 @@ class Validator:
             issues.extend(self._schema_issues(relative, parsed.metadata))
             issues.extend(self._security_issues(relative, memory_id, text))
             issues.extend(self._evidence_issues(relative, parsed.metadata))
+            issues.extend(self._identity_issues(relative, parsed.metadata))
+            issues.extend(self._dependency_issues(relative, parsed.metadata))
             issues.extend(self.registry.run(parsed.metadata, relative))
         for memory_id, paths in id_paths.items():
             if len(paths) > 1:
@@ -323,23 +347,7 @@ class Validator:
         return sorted(result, key=lambda item: (-item["priority"], item["id"]))
 
     def _paths(self):
-        ignored = {
-            ".git",
-            ".obsidian",
-            ".kb",
-            ".kb-evidence",
-            ".kb-memory-events",
-            ".kb-episodes",
-            "__pycache__",
-            ".venv",
-        }
-        for path in self.config.vault.rglob("*.md"):
-            relative = path.relative_to(self.config.vault)
-            if any(part in ignored for part in relative.parts):
-                continue
-            if path.is_symlink() or not path.resolve().is_relative_to(self.config.vault.resolve()):
-                continue
-            yield path
+        return vault_markdown_paths(self.config.vault)
 
     def _schema_issues(self, path: str, metadata: dict[str, Any]) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
@@ -469,6 +477,84 @@ class Validator:
                         str(metadata.get("id", "")),
                         True,
                         {"evidence_id": evidence_id},
+                    )
+                )
+        return issues
+
+    @staticmethod
+    def _identity_issues(path: str, metadata: dict[str, Any]) -> list[ValidationIssue]:
+        if metadata.get("scope") not in REPOSITORY_BOUND_SCOPES or metadata.get("status") in INACTIVE_STATUSES:
+            return []
+        if metadata.get("repository_id") or metadata.get("repo"):
+            return []
+        return [
+            ValidationIssue(
+                "warning",
+                "missing-repository-identity",
+                path,
+                "Repository-scoped memory has no repository_id or repo, so it is excluded wherever a repository "
+                "is active; add repository_id or use global/user scope",
+                str(metadata.get("id", "")),
+                False,
+            )
+        ]
+
+    def _dependency_issues(self, path: str, metadata: dict[str, Any]) -> list[ValidationIssue]:
+        """Report the source changes that make retrieval exclude a memory."""
+        dependencies = source_dependencies(metadata, ("dependencies", "provenance"))
+        if not dependencies or metadata.get("status") in INACTIVE_STATUSES:
+            return []
+        memory_id = str(metadata.get("id", ""))
+        if not self.config.repo:
+            return [
+                ValidationIssue(
+                    "info",
+                    "dependency-unverifiable",
+                    path,
+                    "Source dependencies cannot be checked without a repository; pass --repo or set KB_REPO",
+                    memory_id,
+                )
+            ]
+        root = self.config.repo.resolve()
+        issues: list[ValidationIssue] = []
+        for dependency in dependencies:
+            source = (root / dependency["path"]).resolve()
+            details = {"source": dependency["path"], "expected": dependency["sha256"]}
+            if not source.is_relative_to(root):
+                issues.append(
+                    ValidationIssue(
+                        "error",
+                        "source-path-escape",
+                        path,
+                        f"Source dependency {dependency['path']!r} escapes repository root",
+                        memory_id,
+                        False,
+                        details,
+                    )
+                )
+            elif not source.is_file():
+                issues.append(
+                    ValidationIssue(
+                        "warning",
+                        "dependency-missing",
+                        path,
+                        f"Source dependency {dependency['path']!r} no longer exists; retrieval excludes this memory",
+                        memory_id,
+                        False,
+                        details,
+                    )
+                )
+            elif sha256_file(source) != dependency["sha256"]:
+                issues.append(
+                    ValidationIssue(
+                        "warning",
+                        "dependency-changed",
+                        path,
+                        f"Source dependency {dependency['path']!r} changed; retrieval excludes this memory until "
+                        "`kb revalidate` confirms it still holds",
+                        memory_id,
+                        False,
+                        details,
                     )
                 )
         return issues

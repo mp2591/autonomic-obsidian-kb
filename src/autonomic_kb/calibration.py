@@ -12,6 +12,7 @@ from typing import Any
 
 from .config import KBConfig
 from .index import KnowledgeIndex
+from .scoring import POLICY_VERSION
 
 DEFAULT_WEIGHTS = {
     "lexical": 0.18,
@@ -30,7 +31,7 @@ DEFAULT_WEIGHTS = {
 
 @dataclass(slots=True)
 class RankPolicy:
-    version: str = "rank-v3-static"
+    version: str = POLICY_VERSION
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     intercept: float = -0.1
     trained_examples: int = 0
@@ -48,7 +49,7 @@ def train_rank_policy(
     return {
         "trained": False,
         "promoted": False,
-        "version": "rank-v3-static",
+        "version": POLICY_VERSION,
         "reason": "Learned ranking is disabled in this release; no policy file was loaded or changed.",
         "examples": 0,
     }

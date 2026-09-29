@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -8,11 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import KBConfig
-from .markdown import parse_markdown
 from .models import MemoryRecord
 from .observability import EventLog
-from .storage import recover_transactions, vault_lock
-from .util import stable_json, terms, utc_now
+from .storage import recover_transactions, vault_lock, vault_markdown_paths
+from .util import sha256_text, stable_json, terms, utc_now
 
 SCHEMA_VERSION = 2
 
@@ -76,7 +76,8 @@ class KnowledgeIndex:
             """
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS file_manifest (
-                path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, file_size INTEGER NOT NULL, source_hash TEXT NOT NULL
+                path TEXT PRIMARY KEY, mtime_ns INTEGER NOT NULL, file_size INTEGER NOT NULL, source_hash TEXT NOT NULL,
+                inode INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS notes (
                 id TEXT PRIMARY KEY, declared_id TEXT NOT NULL, path TEXT UNIQUE NOT NULL,
@@ -123,6 +124,11 @@ class KnowledgeIndex:
             CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_id,target);
             """
         )
+        manifest_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(file_manifest)")}
+        if "inode" not in manifest_columns:
+            # Replacing a file (as atomic writers do) changes its inode even when the coarse
+            # mtime and the size are unchanged; existing rows are re-verified once.
+            self.connection.execute("ALTER TABLE file_manifest ADD COLUMN inode INTEGER NOT NULL DEFAULT 0")
         try:
             self.connection.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
@@ -148,21 +154,7 @@ class KnowledgeIndex:
         self.connection.commit()
 
     def _markdown_paths(self) -> Iterable[Path]:
-        ignored_parts = {
-            ".git",
-            ".obsidian",
-            ".kb",
-            ".kb-evidence",
-            ".kb-memory-events",
-            ".kb-episodes",
-            "__pycache__",
-            ".venv",
-        }
-        for path in self.config.vault.rglob("*.md"):
-            relative = path.relative_to(self.config.vault)
-            if any(part in ignored_parts for part in relative.parts):
-                continue
-            yield path
+        return vault_markdown_paths(self.config.vault)
 
     def rebuild(self) -> IndexStats:
         with self.connection:
@@ -193,81 +185,108 @@ class KnowledgeIndex:
         }
         manifest = {
             row["path"]: dict(row)
-            for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash FROM file_manifest")
+            for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash,inode FROM file_manifest")
         }
         seen_paths: set[str] = set()
-        pending: list[tuple[MemoryRecord, str, dict[str, Any] | None, int, int]] = []
-        declared_paths: dict[str, list[str]] = {}
+        changed: dict[str, tuple[MemoryRecord, os.stat_result]] = {}
+        declared_by_path: dict[str, str] = {}
+        refreshed: list[tuple[str, os.stat_result, str]] = []
         for absolute in self._markdown_paths():
             relative = absolute.relative_to(self.config.vault).as_posix()
-            if absolute.is_symlink() or not absolute.resolve().is_relative_to(self.config.vault.resolve()):
-                continue
             seen_paths.add(relative)
             stats.scanned += 1
             stat = absolute.stat()
             current = existing.get(relative)
             cached = manifest.get(relative)
-            if (
-                current
-                and cached
-                and not force
-                and int(cached["mtime_ns"]) == stat.st_mtime_ns
-                and int(cached["file_size"]) == stat.st_size
-            ):
+            if current and cached and not force and self._unchanged(cached, stat):
                 stats.unchanged += 1
-                declared_paths.setdefault(str(current.get("declared_id") or current["id"]), []).append(relative)
+                declared_by_path[relative] = str(current.get("declared_id") or current["id"])
                 continue
-            if absolute.is_symlink() or not absolute.resolve().is_relative_to(self.config.vault.resolve()):
-                continue
-            text = absolute.read_text(encoding="utf-8", errors="replace")
-            record = MemoryRecord.from_text(relative, text)
+            record = self._parse(absolute, relative)
             if not record.schema_valid:
                 stats.malformed += 1
-            declared_paths.setdefault(record.id, []).append(relative)
+            declared_by_path[relative] = record.id
             if current and current["source_hash"] == record.source_hash and not force:
-                self.connection.execute(
-                    "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
-                    "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, "
-                    "file_size=excluded.file_size, source_hash=excluded.source_hash",
-                    (relative, stat.st_mtime_ns, stat.st_size, record.source_hash),
-                )
+                refreshed.append((relative, stat, record.source_hash))
                 stats.unchanged += 1
                 continue
-            pending.append((record, record.id, current, stat.st_mtime_ns, stat.st_size))
-        duplicates = {memory_id: paths for memory_id, paths in declared_paths.items() if len(paths) > 1}
-        stats.duplicate_ids = sum(len(paths) - 1 for paths in duplicates.values())
+            changed[relative] = (record, stat)
+        desired = self._assign_identities(declared_by_path, existing)
+        stats.duplicate_ids = sum(1 for path, identity in desired.items() if identity != declared_by_path[path])
+        # An unchanged note whose row identity must change (a duplicate was added or its
+        # owner removed) is re-read so no row is ever rewritten under another path.
+        for relative, identity in desired.items():
+            if relative not in changed and existing.get(relative) and existing[relative]["id"] != identity:
+                absolute = self.config.vault / relative
+                changed[relative] = (self._parse(absolute, relative), absolute.stat())
+        removed = set(existing) - seen_paths
         with self.connection:
-            for record, declared, current, mtime_ns, file_size in pending:
-                if declared in duplicates and duplicates[declared][0] != record.path:
-                    record.id = f"{declared}::duplicate::{record.source_hash[:8]}"
-                self._upsert(record, declared)
-                self.connection.execute(
-                    "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash) VALUES(?,?,?,?) "
-                    "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, "
-                    "file_size=excluded.file_size, source_hash=excluded.source_hash",
-                    (record.path, mtime_ns, file_size, record.source_hash),
-                )
-                if current:
+            for relative in removed | {path for path in changed if path in existing}:
+                self._delete_row(existing[relative]["id"], relative)
+            for relative in removed:
+                self.connection.execute("DELETE FROM file_manifest WHERE path=?", (relative,))
+                stats.deleted += 1
+            for relative in sorted(changed):
+                record, stat = changed[relative]
+                declared = declared_by_path[relative]
+                record.id = desired[relative]
+                self._insert(record, declared)
+                self._record_manifest(relative, stat, record.source_hash)
+                if relative in existing:
                     stats.updated += 1
                 else:
                     stats.indexed += 1
-            for relative in set(existing) - seen_paths:
-                note_id = existing[relative]["id"]
-                self.connection.execute("DELETE FROM links WHERE source_id=?", (note_id,))
-                self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (note_id,))
-                self.connection.execute("DELETE FROM notes WHERE path=?", (relative,))
-                self.connection.execute("DELETE FROM file_manifest WHERE path=?", (relative,))
-                stats.deleted += 1
-            self._resolve_link_targets()
+            for relative, stat, source_hash in refreshed:
+                self._record_manifest(relative, stat, source_hash)
+            if changed or removed:
+                self._resolve_link_targets()
         self.events.emit("index.completed", **stats.to_dict())
         return stats
 
-    def _upsert(self, record: MemoryRecord, declared_id: str) -> None:
-        previous = self.connection.execute("SELECT id FROM notes WHERE path=?", (record.path,)).fetchone()
-        if previous and previous["id"] != record.id:
-            self.connection.execute("DELETE FROM notes WHERE path=?", (record.path,))
-            self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (previous["id"],))
-            self.connection.execute("DELETE FROM links WHERE source_id=?", (previous["id"],))
+    @staticmethod
+    def _unchanged(cached: dict[str, Any], stat: os.stat_result) -> bool:
+        return (
+            int(cached["mtime_ns"]) == stat.st_mtime_ns
+            and int(cached["file_size"]) == stat.st_size
+            and int(cached.get("inode") or 0) == stat.st_ino
+        )
+
+    @staticmethod
+    def _parse(absolute: Path, relative: str) -> MemoryRecord:
+        return MemoryRecord.from_text(relative, absolute.read_text(encoding="utf-8", errors="replace"))
+
+    @staticmethod
+    def _assign_identities(declared_by_path: dict[str, str], existing: dict[str, dict[str, Any]]) -> dict[str, str]:
+        """Give every path a unique row identity without moving an identity between paths.
+
+        The note already holding a declared identity keeps it; otherwise the first path in
+        sorted order owns it. Every other declarer gets a path-derived duplicate identity,
+        and the read gate excludes all declarers while more than one exists.
+        """
+        by_declared: dict[str, list[str]] = {}
+        for relative in sorted(declared_by_path):
+            by_declared.setdefault(declared_by_path[relative], []).append(relative)
+        desired: dict[str, str] = {}
+        for declared, paths in by_declared.items():
+            owner = next((path for path in paths if existing.get(path, {}).get("id") == declared), paths[0])
+            for path in paths:
+                desired[path] = declared if path == owner else f"{declared}::duplicate::{sha256_text(path)[:8]}"
+        return desired
+
+    def _record_manifest(self, relative: str, stat: os.stat_result, source_hash: str) -> None:
+        self.connection.execute(
+            "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash,inode) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, file_size=excluded.file_size, "
+            "source_hash=excluded.source_hash, inode=excluded.inode",
+            (relative, stat.st_mtime_ns, stat.st_size, source_hash, stat.st_ino),
+        )
+
+    def _delete_row(self, note_id: str, relative: str) -> None:
+        self.connection.execute("DELETE FROM links WHERE source_id=?", (note_id,))
+        self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (note_id,))
+        self.connection.execute("DELETE FROM notes WHERE path=?", (relative,))
+
+    def _insert(self, record: MemoryRecord, declared_id: str) -> None:
         layers = {level: record.layers.get(level, "") for level in range(5)}
         values = (
             record.id,
@@ -317,28 +336,14 @@ class KnowledgeIndex:
                 as_of_commit,version_range,taint,authorized_instruction,token_cost,utility,l0,l1,l2,l3,l4,body,
                 metadata_json,source_hash,schema_valid,indexed_at
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            ON CONFLICT(id) DO UPDATE SET
-                declared_id=excluded.declared_id,path=excluded.path,schema_version=excluded.schema_version,
-                kind=excluded.kind,title=excluded.title,type=excluded.type,scope=excluded.scope,status=excluded.status,
-                summary=excluded.summary,confidence=excluded.confidence,authority=excluded.authority,repo=excluded.repo,
-                repository_id=excluded.repository_id,project=excluded.project,module=excluded.module,branch=excluded.branch,
-                created=excluded.created,updated=excluded.updated,validated=excluded.validated,freshness=excluded.freshness,
-                valid_from=excluded.valid_from,valid_to=excluded.valid_to,as_of_commit=excluded.as_of_commit,
-                version_range=excluded.version_range,taint=excluded.taint,authorized_instruction=excluded.authorized_instruction,
-                token_cost=excluded.token_cost,utility=excluded.utility,l0=excluded.l0,l1=excluded.l1,l2=excluded.l2,
-                l3=excluded.l3,l4=excluded.l4,body=excluded.body,metadata_json=excluded.metadata_json,
-                source_hash=excluded.source_hash,schema_valid=excluded.schema_valid,indexed_at=excluded.indexed_at
             """,
             values,
         )
-        self.connection.execute("DELETE FROM notes_fts WHERE note_id=?", (record.id,))
         self.connection.execute(
             "INSERT INTO notes_fts(note_id,title,summary,l1,l2,l3,path) VALUES(?,?,?,?,?,?,?)",
             (record.id, record.title, record.summary, layers[1], layers[2], layers[3], record.path),
         )
-        self.connection.execute("DELETE FROM links WHERE source_id=?", (record.id,))
-        parsed = parse_markdown(record.body)
-        for target in parsed.links:
+        for target in record.links:
             self.connection.execute(
                 "INSERT OR IGNORE INTO links(source_id,target,target_id,relation,provenance) VALUES(?,?,?,?,?)",
                 (record.id, target, "", "related-to", "wikilink"),
@@ -357,7 +362,9 @@ class KnowledgeIndex:
                         )
 
     def _resolve_link_targets(self) -> None:
-        notes = list(self.connection.execute("SELECT id,declared_id,path,title FROM notes"))
+        notes = list(
+            self.connection.execute("SELECT id,declared_id,path,title FROM notes ORDER BY (id != declared_id), path")
+        )
         by_key: dict[str, str] = {}
         for row in notes:
             keys = {
@@ -383,8 +390,8 @@ class KnowledgeIndex:
         row = self.connection.execute(
             "SELECT n.*,COALESCE(u.uses,0) AS uses,u.last_used FROM notes n "
             "LEFT JOIN (SELECT note_id,COUNT(*) uses,MAX(retrieved_at) last_used FROM usage GROUP BY note_id) u "
-            "ON n.id=u.note_id WHERE n.id=? OR n.declared_id=? LIMIT 1",
-            (memory_id, memory_id),
+            "ON n.id=u.note_id WHERE n.id=? OR n.declared_id=? ORDER BY (n.id != ?), n.path LIMIT 1",
+            (memory_id, memory_id, memory_id),
         ).fetchone()
         return self._row(row) if row else None
 
@@ -393,13 +400,18 @@ class KnowledgeIndex:
         return self._row(row) if row else None
 
     def all_notes(self, statuses: set[str] | None = None) -> list[dict[str, Any]]:
+        query = (
+            "SELECT n.*,COALESCE(u.uses,0) AS uses,u.last_used FROM notes n "
+            "LEFT JOIN (SELECT note_id,COUNT(*) uses,MAX(retrieved_at) last_used FROM usage GROUP BY note_id) u "
+            "ON n.id=u.note_id"
+        )
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
             rows = self.connection.execute(
-                f"SELECT * FROM notes WHERE status IN ({placeholders}) ORDER BY path", tuple(statuses)
+                f"{query} WHERE n.status IN ({placeholders}) ORDER BY n.path", tuple(sorted(statuses))
             ).fetchall()
         else:
-            rows = self.connection.execute("SELECT * FROM notes ORDER BY path").fetchall()
+            rows = self.connection.execute(f"{query} ORDER BY n.path").fetchall()
         return [self._row(row) for row in rows]
 
     def set_eligible(self, identities: list[str] | None) -> None:

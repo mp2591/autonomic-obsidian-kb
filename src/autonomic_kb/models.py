@@ -115,6 +115,7 @@ class MemoryRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     source_hash: str = ""
     schema_valid: bool = True
+    links: list[str] = field(default_factory=list)
 
     @classmethod
     def from_text(cls, path: str, text: str) -> MemoryRecord:
@@ -194,6 +195,7 @@ class MemoryRecord:
             metadata=metadata,
             source_hash=sha256_text(text),
             schema_valid=schema_valid,
+            links=parsed.links,
         )
 
     def to_dict(self, include_body: bool = False) -> dict[str, Any]:
@@ -266,6 +268,8 @@ class RetrievalManifest:
     missing_evidence: list[str] = field(default_factory=list)
     token_count_exact: bool = False
     delivery: str | None = None
+    unrecorded_evidence: list[str] = field(default_factory=list)
+    label_missing: bool = True
 
     @property
     def remaining_tokens(self) -> int:
@@ -282,6 +286,7 @@ class RetrievalManifest:
             "route": self.route,
             "state": self.state,
             "missing_evidence": self.missing_evidence,
+            "unrecorded_evidence": self.unrecorded_evidence,
             "token_count_exact": self.token_count_exact,
             "context": asdict(self.context),
             "items": [item.to_dict() for item in self.items],
@@ -293,10 +298,19 @@ class RetrievalManifest:
             return self.delivery
         lines = [f"State: {self.state}", f"Route: {self.route}"]
         if self.missing_evidence:
-            lines.append("Missing: " + ", ".join(self.missing_evidence))
+            lines.append("Missing: " + self._missing_text())
         for item in self.items:
             lines.extend(["", f"## {item.title} [{item.id}]", item.text.strip()])
         return "\n".join(lines).rstrip() + "\n"
+
+    def _missing_text(self) -> str:
+        if not self.items or not self.label_missing:
+            return ", ".join(self.missing_evidence)
+        # Tell the agent whether expanding delivered notes can help or the KB simply lacks it.
+        unrecorded = [role for role in self.missing_evidence if role in self.unrecorded_evidence]
+        undelivered = [role for role in self.missing_evidence if role not in self.unrecorded_evidence]
+        groups = ((undelivered, "not delivered"), (unrecorded, "not recorded"))
+        return "; ".join(f"{', '.join(roles)} ({label})" for roles, label in groups if roles)
 
     def to_agent_dict(self) -> dict[str, Any]:
         """Minimal model-visible JSON; to_dict remains explicit diagnostic output."""

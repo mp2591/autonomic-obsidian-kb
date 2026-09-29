@@ -125,10 +125,28 @@ def trust_gate(
     return True, "passed trust gate"
 
 
+def _string_leaves(value: object) -> Iterable[str]:
+    """Yield every string in a nested value exactly as it will be written.
+
+    Scanning a JSON dump is unsafe: escaping turns a newline before ``api_key=...`` into
+    ``\\napi_key``, which defeats word-boundary patterns.
+    """
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            yield item
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                stack.extend((key, child))
+        elif isinstance(item, list | tuple | set | frozenset):
+            stack.extend(item)
+        elif item is not None and not isinstance(item, bool | int | float):
+            yield str(item)
+
+
 def reject_secrets(value: object) -> None:
     """Check the complete object before persistence; never include its secret in errors."""
-    import json
-
-    text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
-    if any(finding.category == "secret" for finding in scan_content(text)):
-        raise ValueError("refusing to persist secret-bearing content")
+    for text in _string_leaves(value):
+        if any(finding.category == "secret" for finding in scan_content(text)):
+            raise ValueError("refusing to persist secret-bearing content")
