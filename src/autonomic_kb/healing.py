@@ -10,7 +10,7 @@ from .evidence import OperationLedger
 from .index import KnowledgeIndex
 from .markdown import dump_frontmatter, parse_markdown
 from .security import redact_secrets, redact_value
-from .storage import semantic_transaction, vault_markdown_paths
+from .storage import move_into, semantic_transaction, vault_markdown_paths
 from .util import age_days, atomic_write, jaccard, sha256_text, slugify, utc_now
 from .validation import ValidationReport, Validator
 
@@ -213,12 +213,8 @@ class Healer:
             metadata["freshness"] = "untrusted"
             metadata["updated"] = now
             atomic_write(path, dump_frontmatter(metadata) + body.lstrip())
-            destination = self.config.vault / self.config.quarantine_dir / path.name
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination = move_into(path, self.config.vault / self.config.quarantine_dir, memory_id or action.path)
             if destination != path:
-                if destination.exists():
-                    destination = destination.with_name(f"{destination.stem}-{slugify(action.path, 12)}.md")
-                path.replace(destination)
                 action.details["destination"] = destination.relative_to(self.config.vault).as_posix()
             action.applied = True
         if action.applied:
@@ -351,12 +347,7 @@ def _archive(config: KBConfig, source: Path, memory_id: str, superseded_by: str 
         metadata["superseded_by"] = superseded_by
     after = dump_frontmatter(metadata) + parsed.body.lstrip()
     atomic_write(source, after)
-    destination = config.vault / config.archive_dir / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists() and destination != source:
-        destination = destination.with_name(f"{destination.stem}-{slugify(memory_id, 10)}.md")
-    if destination != source:
-        source.replace(destination)
+    destination = move_into(source, config.vault / config.archive_dir, memory_id)
     return destination, before, after
 
 

@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any
 
 from .index import KnowledgeIndex
+from .util import sha256_text
 
 
 def graph_data(index: KnowledgeIndex, include_archived: bool = False) -> dict[str, Any]:
@@ -99,8 +100,9 @@ def render_graph(index: KnowledgeIndex, format: str = "json", include_archived: 
             label = str(node["title"]).replace('"', "'")
             lines.append(f'  {aliases[node["internal_id"]]}["{label}"]')
         for edge in data["edges"]:
-            source = aliases.get(edge["source"], f"X{abs(hash(edge['source']))}")
-            target = aliases.get(edge["target"], f"X{abs(hash(edge['target']))}")
+            # Stable aliases: hash() is randomized per process.
+            source = aliases.get(edge["source"], f"X{sha256_text(str(edge['source']))[:10]}")
+            target = aliases.get(edge["target"], f"X{sha256_text(str(edge['target']))[:10]}")
             lines.append(f'  {source} -- "{edge["relation"]}" --> {target}')
         return "\n".join(lines)
     raise ValueError(f"unsupported graph format: {format}")

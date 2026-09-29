@@ -22,6 +22,11 @@ SCHEMA_VERSION = 2
 PARSER_FORMAT = "v3.2.0"
 
 
+def _like_literal(value: str) -> str:
+    """Escape LIKE wildcards so `test_cli` does not also match `testXcli`."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @dataclass(slots=True)
 class IndexStats:
     scanned: int = 0
@@ -453,8 +458,8 @@ class KnowledgeIndex:
             return []
         rows = self.connection.execute(
             "SELECT * FROM notes WHERE (LOWER(id)=? OR LOWER(declared_id)=? OR LOWER(path)=? OR LOWER(title)=? "
-            "OR LOWER(path) LIKE ?)" + self._eligible_sql() + " ORDER BY LENGTH(path),path LIMIT ?",
-            (q, q, q, q, f"%{q}%", limit),
+            "OR LOWER(path) LIKE ? ESCAPE '\\')" + self._eligible_sql() + " ORDER BY LENGTH(path),path LIMIT ?",
+            (q, q, q, q, f"%{_like_literal(q)}%", limit),
         ).fetchall()
         result = [self._row(row) for row in rows]
         for position, item in enumerate(result):
@@ -498,8 +503,10 @@ class KnowledgeIndex:
                         item["rank_lexical"] = position + 1
                         result.append(item)
                 return result
-        clauses = " OR ".join("LOWER(title || ' ' || summary || ' ' || l2 || ' ' || path) LIKE ?" for _ in query_terms)
-        params = tuple(f"%{term.lower()}%" for term in query_terms) + (limit,)
+        clauses = " OR ".join(
+            "LOWER(title || ' ' || summary || ' ' || l2 || ' ' || path) LIKE ? ESCAPE '\\'" for _ in query_terms
+        )
+        params = tuple(f"%{_like_literal(term.lower())}%" for term in query_terms) + (limit,)
         rows = self.connection.execute(
             f"SELECT * FROM notes WHERE ({clauses})" + self._eligible_sql() + " LIMIT ?", params
         ).fetchall()

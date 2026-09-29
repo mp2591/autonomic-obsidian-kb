@@ -36,6 +36,8 @@ from .telemetry import TaskOutcome, TelemetryStore
 from .util import sha256_text, utc_now
 from .validation import Validator
 
+DEFAULT_AGENT = "generic"
+
 
 def _emit(value: Any, json_output: bool = False) -> None:
     if json_output and hasattr(value, "to_agent_dict"):
@@ -66,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--vault", help="Obsidian vault root (or KB_VAULT)")
     parser.add_argument("--repo", help="Repository whose state validates and scopes memories")
-    parser.add_argument("--agent", default=os.environ.get("KB_AGENT", "generic"), help="agent/tool identity")
+    parser.add_argument("--agent", default=os.environ.get("KB_AGENT", DEFAULT_AGENT), help="agent/tool identity")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -628,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
             _emit(result, args.json)
             return 0
         if args.command == "lease":
+            if args.agent == DEFAULT_AGENT:
+                raise ValueError("leases need a distinct agent identity; pass --agent or set KB_AGENT")
             store = LeaseStore(config)
             result = (
                 store.acquire(args.task, args.agent, ttl_minutes=args.ttl).to_dict()

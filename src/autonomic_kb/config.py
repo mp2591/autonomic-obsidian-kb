@@ -25,8 +25,10 @@ recurrence_threshold = 2
 allow_untrusted = false
 allow_cross_repo = false
 require_instruction_authorization = true
-# CLI `remember --force` / elevated --authority or --taint / --authorize-instruction
-# (each needs --reason and is recorded in the ledger). Set false to require review.
+# true: CLI `remember --force`, elevated --authority/--taint and --authorize-instruction
+# are allowed with --reason (recorded in the ledger), and candidates whose score clears
+# promotion_threshold activate automatically. false: no self-vouching of any kind; every
+# candidate (remember, learn, consolidate, MCP) waits in the inbox for `kb promote`.
 allow_privileged_remember = true
 
 [paths]

@@ -18,6 +18,15 @@ from .security import TAINT_ORDER, instruction_authorized, reject_secrets, scan_
 from .storage import semantic_transaction
 from .util import atomic_write, estimate_tokens, jaccard, sha256_file, sha256_text, slugify, stable_json, utc_now
 
+# Promotion inputs a caller could inflate to approve its own candidate.
+SELF_ASSESSED_FIELDS = (
+    "reuse_likelihood",
+    "rediscovery_cost",
+    "stability",
+    "uniqueness",
+    "token_savings",
+    "maintenance_cost",
+)
 VALUE_FIELDS = (
     "confidence",
     "reuse_likelihood",
@@ -94,8 +103,15 @@ class LearningCandidate:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> LearningCandidate:
+        """Build an imported candidate that cannot vouch for itself.
+
+        Imports (`kb learn --file`, MCP) cannot assign authority, taint, instruction
+        authorization, or the value estimates that decide promotion.
+        """
         aliases = {"type": "memory_type", "body": "detail", "source": "provenance"}
         normalized = {aliases.get(key, key): item for key, item in value.items()}
+        for name in SELF_ASSESSED_FIELDS:
+            normalized.pop(name, None)
         normalized.update(authority="agent", taint="agent", authorized_instruction=False)
         allowed = set(cls.__dataclass_fields__)
         return cls(**{key: item for key, item in normalized.items() if key in allowed})
@@ -245,6 +261,14 @@ class Learner:
         elif duplicate and duplicate["kind"] == "conflict":
             status = "conflicted"
             status_reason = "contradicts an applicable memory; a reviewer resolves it with `kb supersede`"
+        elif not self.config.allow_privileged_remember:
+            # Scores, evidence counts, and evaluation evidence are caller-supplied; with
+            # self-vouching disabled only a reviewer command activates a memory.
+            status = "inbox"
+            status_reason = (
+                "review required ([security] allow_privileged_remember = false); a reviewer activates it with "
+                "`kb promote`"
+            )
         elif force:
             status, status_reason = "active", "promotion forced by the caller"
         elif score >= threshold:

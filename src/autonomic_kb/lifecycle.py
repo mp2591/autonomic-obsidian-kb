@@ -19,8 +19,8 @@ from .index import KnowledgeIndex
 from .learning import Learner
 from .markdown import dump_frontmatter, parse_markdown
 from .security import instruction_authorized, scan_content
-from .storage import semantic_transaction
-from .util import atomic_write, sha256_file, sha256_text, slugify, utc_now
+from .storage import move_into, semantic_transaction
+from .util import atomic_write, sha256_file, sha256_text, utc_now
 
 REVIEWABLE = {"inbox", "conflicted"}
 RETIRED = {"archived", "superseded", "retracted", "quarantined"}
@@ -280,11 +280,7 @@ class Lifecycle:
         atomic_write(path, after)
         destination = path
         if move_to and Path(note["path"]).is_relative_to(self.config.inbox_dir):
-            destination = self.config.vault / move_to / path.name
-            if destination.exists():
-                destination = destination.with_name(f"{destination.stem}-{slugify(note['id'], 12)}.md")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            path.replace(destination)
+            destination = move_into(path, self.config.vault / move_to, note["declared_id"] or note["id"])
         return destination, before, after
 
     def _note(self, memory_id: str) -> dict[str, Any]:
