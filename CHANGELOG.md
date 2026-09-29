@@ -10,6 +10,7 @@ Fixes from the September 2026 repository review. Each defect has a reproduction 
 - `kb` exits with an error when it cannot find a vault (no `--vault`, no `KB_VAULT`, and no parent directory containing `kb.toml` or `.obsidian`), and `--vault` must name an existing directory. Run `kb init <path>` first.
 - Without `--repo` or `KB_REPO`, the scoping repository is the Git worktree of the current directory rather than the one containing the vault. Pass `--repo` explicitly where the working directory is not the project (hooks, schedulers, MCP launchers).
 - `kb init` creates its starter note with `global` scope and the identity `kb:global:repository-map:knowledge-base`.
+- `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` now require `--reason`; scripts using them must add one.
 - The index gains derived columns and a parser-format bump, so the first command after upgrading re-reads every note and re-verifies evidence once.
 
 ### Security and scoping
@@ -23,13 +24,17 @@ Fixes from the September 2026 repository review. Each defect has a reproduction 
 
 ### Durability and lifecycle
 
-- Semantic transactions snapshot notes and operation records as hard links instead of reading, secret-scanning, and journaling the whole vault. One human note containing a credential no longer blocks every write, and journals are removed after commit. A rollback that cannot restore a file edited in place fails closed.
+- Semantic transactions snapshot notes and operation records as hard links instead of reading, secret-scanning, and journaling the whole vault. One human note containing a credential no longer blocks every write, and journals are removed after commit.
 - Every vault walk skips hidden directories and symlinks, so transaction snapshots are never indexed or validated.
 - `kb heal --apply` can quarantine a secret-bearing note; the moved note's findings are no longer counted as new errors.
 - `kb compact` and `kb forget` run transactionally with atomic writes; compaction sees recorded usage and no longer archives memories that retrieval still delivers.
 - New reviewer commands `kb inbox`, `kb promote`, `kb revalidate` (emits `REVALIDATE`), and `kb supersede` (emits `SUPERSEDE`) close the path from inbox and changed sources back to retrievable knowledge. They are CLI-only and require a reason.
 - `kb validate` reports `dependency-changed` and `dependency-missing` for memories that retrieval excludes after a source edit, and `kb heal` plans `require-revalidation`.
 - `kb remember` validates type, scope, authority, taint, and value ranges before writing, and its result explains the promotion decision (score, threshold, reason).
+- Options that let a caller vouch for its own candidate (`--force`, elevated `--authority`/`--taint`, `--authorize-instruction`) are recorded with actor and reason in the ledger, and `[security] allow_privileged_remember = false` disables them.
+- `kb merge` and `kb split` retire overlapping or overloaded memories with provenance and emit `MERGE`/`SPLIT`; every documented ledger operation except `NOOP` now has a built-in producer.
+- Rollback keeps external in-place edits (a file that still has its recorded inode) and sets aside files created during a failed transaction under `.kb/rolled-back/`, so a failed transaction no longer blocks the vault. `kb reconcile` inspects and resolves journals left by a crash, including the 0.3.0 inline format; journals interrupted while snapshotting are discarded automatically.
+- Heal redacts secret values when it quarantines a note, keeping the unredacted original only in local backups; `kb init` writes a vault `.gitignore` for local state and `kb doctor` checks it.
 
 ### Retrieval
 

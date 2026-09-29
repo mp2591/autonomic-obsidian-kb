@@ -73,7 +73,7 @@ On first telemetry use, legacy `.kb/feedback.jsonl` and `.kb/outcomes.jsonl` are
 
 The strengthened evidence identity is intentionally not backward-compatible with content-only evidence IDs. Old evidence files remain on disk, but are not silently relabeled as provenance-verified. Re-capture/revalidate their sources and amend memory references explicitly. There is no automatic trust-upgrading conversion.
 
-Ordinary exceptions during KB-owned edits roll back semantic files and their operation records together. A process crash can leave a prepared journal in `.kb-transactions/`; subsequent reads and writes stop instead of guessing which later human edits to overwrite. Reconcile the saved before-state with current Markdown under owner control before resolving that journal. This is a deliberate fail-closed state, not a promise of automatic conflict resolution. The writer lock coordinates KB processes, not unrelated editors or distributed machines.
+Ordinary exceptions during KB-owned edits roll back semantic files and their operation records together. A process crash can leave a prepared journal in `.kb-transactions/`; subsequent reads and writes stop instead of guessing which later human edits to overwrite. `kb reconcile` lists each interrupted transaction with the status of every protected file; resolve it with `--accept-current` or `--restore-snapshot` (both require `--yes`, and files created after the crash are kept unless `--delete-new` is given). This is a deliberate fail-closed state, not a promise of automatic conflict resolution. The writer lock coordinates KB processes, not unrelated editors or distributed machines.
 
 ## Publication constraint
 

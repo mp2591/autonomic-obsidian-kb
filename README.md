@@ -24,7 +24,7 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 
 - **Obsidian Markdown remains human-readable semantic authority.**
 - **Content-addressed evidence objects** preserve source spans, observations, task episodes, test/command results, and corrections.
-- **Append-only memory operations** make semantic evolution auditable. Built-in commands emit `ADD`, `AMEND`, `SUPERSEDE`, `RETRACT`, `REVALIDATE`, `QUARANTINE`, and `ARCHIVE`; the ledger also accepts `MERGE`, `SPLIT`, and `NOOP` for external tooling, but no built-in command emits them yet.
+- **Append-only memory operations** make semantic evolution auditable. Built-in commands emit `ADD`, `AMEND`, `SUPERSEDE`, `MERGE`, `SPLIT`, `RETRACT`, `REVALIDATE`, `QUARANTINE`, and `ARCHIVE`; `NOOP` is accepted for external tooling.
 - **Schema v2** adds memory families, repository identity, explicit valid-time intervals and source applicability, provenance taint, evidence, validators, and instruction authorization while retaining legacy-v1 compatibility.
 - **Incremental indexing** skips unchanged Markdown by stat manifest; SQLite/FTS5 remains disposable.
 - **Deterministic task-aware retrieval routing** can choose no retrieval, exact+lexical, lexical, hybrid, or temporal paths.
@@ -34,8 +34,8 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 - **Task-planned context compilation** selects whole representations and preserves commands, preconditions, and verification without unsafe sentence splicing.
 - **Temporal, version, and source gates** check declared applicability; Git ancestry alone is not continuing validity.
 - **Non-executable validation** checks schema, evidence, file existence, and source hashes. Note-defined command execution is disabled.
-- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, migrate) snapshot notes and events as hard links and restore them on handled failures; an in-place edit that makes rollback unfaithful, or an interrupted journal, fails closed pending reconciliation.
-- **Reviewer lifecycle** (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`) is the explicit gate between agent-submitted candidates and retrievable knowledge; it is CLI-only.
+- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, merge, split, migrate) snapshot notes and events as hard links. On a handled failure they restore what the KB replaced and keep external in-place edits, such as Obsidian saving a note; files created meanwhile are set aside under `.kb/rolled-back/`. Only a crashed process leaves a blocking journal, which `kb reconcile` resolves under owner control.
+- **Reviewer lifecycle** (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`, `kb merge`, `kb split`) is the explicit gate between agent-submitted candidates and retrievable knowledge; it is CLI-only, and every command requires a reason.
 - **Episodic capture and recurrence consolidation** prevent every observation from becoming canonical memory.
 - **Multi-agent leases** reduce duplicate investigations.
 - **Task traces, durable feedback/outcomes, isolated replay, and shadow policies** expose measurement without equating a proxy score with demonstrated avoided work.
@@ -158,9 +158,11 @@ Candidates that do not clear the promotion threshold wait in the inbox, which re
 kb inbox                                            # candidates, scores, blockers
 kb promote <memory-id> --reason "checked against the code"
 kb supersede <old-id> <new-id> --reason "resolved the contradiction"
+kb merge <target-id> <source-id>... --reason "one note instead of three overlapping ones"
+kb split <source-id> <part-id> <part-id>... --reason "separate build and deploy procedures"
 ```
 
-Promotion refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence.
+Promotion, and activation of a supersede/merge/split replacement, refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb remember --force`, an elevated `--authority` or `--taint`, and `--authorize-instruction` let the caller vouch for its own candidate, so each requires `--reason` and is recorded in the ledger; set `[security] allow_privileged_remember = false` to require reviewer promotion for everything.
 
 ## Feedback and outcome learning
 
@@ -193,7 +195,10 @@ kb validate
 kb validation-queue
 kb heal             # dry-run
 kb heal --apply     # backup + apply + post-validation + rollback on regression
+kb reconcile        # list or resolve a transaction interrupted by a crash
 ```
+
+Quarantine redacts secret values (keys stay readable, private-key blocks are removed) in the vault copy; the unredacted original stays only in the local `.kb/backups/`, which the vault `.gitignore` written by `kb init` excludes. Rotate any credential that was ever committed, because Git history keeps it.
 
 Validator types include repository-contained file existence and source hashes. All note-defined command validators are rejected without execution, including formerly allowlisted commands.
 

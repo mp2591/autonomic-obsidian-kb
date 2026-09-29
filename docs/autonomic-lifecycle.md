@@ -10,7 +10,7 @@ Capture task episodes and content-addressed evidence. Candidate promotion consid
 
 ## Review
 
-Candidates below the promotion threshold wait in the inbox, and retrieval ignores them. The `remember` result reports the score, the threshold, and why the candidate was not promoted. A reviewer runs `kb inbox` to see candidates and blockers, and `kb promote <id> --reason …` to activate one. Promotion refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb supersede <old> <new> --reason …` retires a memory in favor of a replacement; this is how a contradiction is resolved. These commands are CLI-only, require a reason, run transactionally, and append `AMEND` or `SUPERSEDE` operations.
+Candidates below the promotion threshold wait in the inbox, and retrieval ignores them. The `remember` result reports the score, the threshold, and why the candidate was not promoted. A reviewer runs `kb inbox` to see candidates and blockers, and `kb promote <id> --reason …` to activate one. Promotion refuses unsafe content, unauthorized privileged instructions, and missing or tampered evidence. `kb supersede <old> <new> --reason …` retires a memory in favor of a replacement; this is how a contradiction is resolved. `kb merge <target> <source>…` retires overlapping memories into one reviewed note, and `kb split <source> <part>…` retires an overloaded memory in favor of narrower ones; both record provenance (`merged_into`/`merged_from`, `split_into`/`split_from`). These commands are CLI-only, require a reason, run transactionally, and append `AMEND`, `SUPERSEDE`, `MERGE`, or `SPLIT` operations.
 
 ## Consolidate
 
@@ -24,7 +24,7 @@ A memory bound to a source file with `--source` is excluded from retrieval once 
 
 ## Heal
 
-Dry-run is the default. Mechanical metadata, stale marking, unambiguous link repair and quarantine are eligible. Files are backed up and post-validation runs after apply; the healer rolls back if errors increase. A quarantined note's findings at its new path are not counted as new errors. Semantic contradictions and changed sources remain explicit reviewer work.
+Dry-run is the default. Mechanical metadata, stale marking, unambiguous link repair and quarantine are eligible. Files are backed up and post-validation runs after apply; the healer rolls back if errors increase. A quarantined note's findings at its new path are not counted as new errors, and its secret values are redacted in the vault copy. Semantic contradictions and changed sources remain explicit reviewer work.
 
 ## Optimize
 
