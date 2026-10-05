@@ -24,7 +24,7 @@ A memory bound to a source file with `--source` is excluded from retrieval once 
 
 ## Heal
 
-Dry-run is the default. Mechanical metadata, stale marking, unambiguous link repair and quarantine are eligible. Files are backed up and post-validation runs after apply; the healer rolls back if errors increase. A quarantined note's findings at its new path are not counted as new errors, and its secret values are redacted in the vault copy. Semantic contradictions and changed sources remain explicit reviewer work.
+Dry-run is the default. Mechanical metadata, stale marking, unambiguous link repair and quarantine are eligible. Stale marking changes the status of reviewed notes only: inbox and conflicted candidates keep their status, and retired notes (archived, superseded, retracted, quarantined) are skipped. With `--apply`, validation and planning run under the writer lock. Files are backed up and post-validation runs after apply; the healer rolls back if errors increase. A quarantined note's findings at its new path are not counted as new errors, and its secret values are redacted in the vault copy. Semantic contradictions and changed sources remain explicit reviewer work.
 
 ## Optimize
 
