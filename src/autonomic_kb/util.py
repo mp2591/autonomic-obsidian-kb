@@ -109,7 +109,11 @@ def tracked_writes(registry: dict[str, str | None] | None = None) -> Iterator[di
 
 
 def record_write(path: Path, digest: str | None) -> None:
-    """Report that the KB left ``path`` holding bytes with ``digest`` (None: removed)."""
+    """Report that the KB is about to leave ``path`` holding bytes with ``digest`` (None: removed).
+
+    Callers record before changing the file, so a crash right after the change cannot
+    leave a KB write unattributed; rollback recognises a change that never landed.
+    """
     registries = getattr(_TRACKING, "registries", ())
     if registries:
         key = tracked_key(path)
@@ -125,8 +129,9 @@ def atomic_write(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        if getattr(_TRACKING, "registries", ()):  # hash only inside a transaction; caches can be large
+            record_write(path, sha256_text(content))
         os.replace(temporary, path)
-        record_write(path, sha256_text(content))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -134,8 +139,8 @@ def atomic_write(path: Path, content: str) -> None:
 
 def remove_file(path: Path) -> None:
     """Delete ``path`` (if present) and record the removal for an active transaction."""
-    path.unlink(missing_ok=True)
     record_write(path, None)
+    path.unlink(missing_ok=True)
 
 
 def stable_json(value: Any) -> str:

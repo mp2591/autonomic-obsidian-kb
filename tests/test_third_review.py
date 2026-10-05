@@ -262,6 +262,43 @@ class CrashReconcileOwnershipTests(unittest.TestCase):
         self.assertEqual(self.other.read_text(), "edited by a person after the crash\n")
         self.assertTrue((self.vault / "after-crash.md").exists())
 
+    def test_a_write_interrupted_right_after_it_lands_is_still_attributed_to_the_kb(self):
+        script = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb import util\n"
+            "from autonomic_kb.storage import semantic_transaction\n"
+            "real = os.replace\n"
+            "def crash_after(source, target):\n"
+            "    real(source, target)\n"
+            "    os._exit(1)\n"
+            "with semantic_transaction(Path(sys.argv[1])):\n"
+            "    util.os.replace = crash_after\n"
+            "    util.atomic_write(Path(sys.argv[2]), 'half-finished kb write\\n')\n"
+        )
+        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        command = [sys.executable, "-c", script, str(self.vault), str(self.kb_note)]
+        self.assertEqual(subprocess.run(command, env=environment, check=False).returncode, 1)
+        self.assertEqual(self.kb_note.read_text(), "half-finished kb write\n")
+        pending = storage.pending_transactions(self.vault)[0]
+        self.assertEqual(pending["kb_written"], ["kb-note.md"])
+        self.assertEqual(pending["external"], [])
+        storage.resolve_transaction(self.vault, pending["journal"], "restore-snapshot")
+        self.assertEqual(self.kb_note.read_text(), self.original)
+
+    def test_a_failed_write_is_not_reported_as_a_conflict(self):
+        failing = patch("autonomic_kb.util.os.replace", side_effect=OSError(errno.EIO, "I/O error"))
+        with self.assertRaises(OSError) as raised, semantic_transaction(self.vault):
+            failing.start()  # only the KB write inside the transaction fails
+            try:
+                atomic_write(self.kb_note, "never lands\n")
+            finally:
+                failing.stop()
+        self.assertEqual(raised.exception.errno, errno.EIO)
+        self.assertEqual(self.kb_note.read_text(), self.original)
+        self.assertEqual(storage.rollback_conflicts(self.vault), [])
+        self.assertFalse(getattr(raised.exception, "__notes__", None))
+
     def test_restore_snapshot_preserves_a_save_made_on_top_of_the_kb_write(self):
         journal = self._crash_after_kb_write()
         _editor_atomic_save(self.kb_note, "a person saved over the half-finished write\n")

@@ -210,8 +210,8 @@ def move_into(source: Path, directory: Path, identity: str) -> Moved:
     if source.parent.resolve() == directory.resolve():
         return Moved(source)
     staged = source.with_name(f".{source.name}.kb-move-{uuid.uuid4().hex}")
-    os.rename(source, staged)
     record_write(source, None)
+    os.rename(source, staged)
     try:
         destination, exact = _place(staged, directory / source.name, identity)
     except BaseException:
@@ -354,6 +354,16 @@ def _capture(target: Path, kept: Path) -> bool:
     return True
 
 
+def _holds_before_state(target: Path, saved: Path) -> bool:
+    """True when ``target`` is still (or again) the snapshot's before-state: a KB write that never landed."""
+    try:
+        if os.path.samefile(target, saved):
+            return True
+        return target.stat().st_size == saved.stat().st_size and target.read_bytes() == saved.read_bytes()
+    except FileNotFoundError:
+        return False
+
+
 def _link_exclusive(source: Path, destination: Path) -> None:
     """Make ``destination`` a link to (or exclusive copy of) ``source``; raise FileExistsError if taken."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +396,8 @@ def _rollback(
         if relative is None:
             continue
         target = vault / relative
+        if relative in files and _holds_before_state(target, snapshot / relative):
+            continue  # the write was recorded but never landed, or nothing changed
         kept = holding / relative
         if _capture(target, kept):
             preserved = kept.relative_to(vault).as_posix()
