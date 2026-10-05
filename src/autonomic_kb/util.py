@@ -6,12 +6,15 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Iterable
+import threading
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_./:+-]+")
+_TRACKING = threading.local()
 
 
 def utc_now() -> str:
@@ -83,6 +86,37 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def tracked_key(path: Path) -> str:
+    """Stable identity of a path for write tracking: the real parent directory plus the name."""
+    return os.path.join(os.path.realpath(path.parent), path.name)
+
+
+@contextmanager
+def tracked_writes(registry: dict[str, str | None] | None = None) -> Iterator[dict[str, str | None]]:
+    """Record what this thread writes meanwhile: path key -> digest of the bytes written, or None once removed.
+
+    A semantic transaction uses this to tell its own output from changes other programs
+    make to the same files, instead of inferring ownership from inodes. ``registry`` may be
+    a dict subclass that also persists each entry.
+    """
+    outer = getattr(_TRACKING, "registries", ())
+    registry = {} if registry is None else registry
+    _TRACKING.registries = (*outer, registry)
+    try:
+        yield registry
+    finally:
+        _TRACKING.registries = outer
+
+
+def record_write(path: Path, digest: str | None) -> None:
+    """Report that the KB left ``path`` holding bytes with ``digest`` (None: removed)."""
+    registries = getattr(_TRACKING, "registries", ())
+    if registries:
+        key = tracked_key(path)
+        for registry in registries:
+            registry[key] = digest
+
+
 def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
@@ -92,9 +126,16 @@ def atomic_write(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        record_write(path, sha256_text(content))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def remove_file(path: Path) -> None:
+    """Delete ``path`` (if present) and record the removal for an active transaction."""
+    path.unlink(missing_ok=True)
+    record_write(path, None)
 
 
 def stable_json(value: Any) -> str:

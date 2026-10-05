@@ -4,6 +4,10 @@ Candidates submitted by agents land in the inbox unless they carry enough eviden
 clear the promotion threshold. These operations are the review gate they pass through,
 so they are CLI-only and are not exposed as MCP tools. Each one runs in a semantic
 transaction, requires a stated reason, and appends a ledger operation.
+
+Every precondition is checked inside the transaction, against notes re-read under the
+writer lock, so a reviewer acting on state another reviewer has since changed fails
+instead of committing on stale reads.
 """
 
 from __future__ import annotations
@@ -74,25 +78,30 @@ class Lifecycle:
 
     def promote(self, memory_id: str, *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         reason = _require_reason(reason)
-        note = self._note(memory_id)
-        if note["status"] == "conflicted":
-            raise ValueError(f"{memory_id} contradicts another memory; resolve it with `kb supersede`")
-        if note["status"] != "inbox":
-            raise ValueError(f"only inbox memories can be promoted; {memory_id} is {note['status']}")
-        self._raise_blockers(note)
         with semantic_transaction(self.config.vault):
-            destination = self._activate(note, reason=f"promote: {reason}", actor=actor)
+            note = self._note(memory_id)
+            if note["status"] == "conflicted":
+                raise ValueError(f"{memory_id} contradicts another memory; resolve it with `kb supersede`")
+            if note["status"] != "inbox":
+                raise ValueError(f"only inbox memories can be promoted; {memory_id} is {note['status']}")
+            self._raise_blockers(note)
+            destination, conflicts = self._activate(note, reason=f"promote: {reason}", actor=actor)
         self.index.index_vault()
         return {
             "action": "promoted",
             "memory_id": note["declared_id"] or note["id"],
             "status": "active",
             "path": destination.relative_to(self.config.vault).as_posix(),
+            "conflicts": conflicts,
         }
 
     def revalidate(self, memory_id: str, *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         """Confirm a memory still holds for the current sources and rebind their digests."""
         reason = _require_reason(reason)
+        with semantic_transaction(self.config.vault):
+            return self._revalidate(memory_id, reason=reason, actor=actor)
+
+    def _revalidate(self, memory_id: str, *, reason: str, actor: str) -> dict[str, Any]:
         note = self._note(memory_id)
         if note["status"] in RETIRED:
             raise ValueError(f"{memory_id} is {note['status']} and cannot be revalidated")
@@ -145,18 +154,17 @@ class Lifecycle:
             if data.get("status") == "stale":
                 data["status"] = "active"
 
-        with semantic_transaction(self.config.vault):
-            path, before, after = self._rewrite(note, mutate)
-            self.operations.append(
-                "REVALIDATE",
-                note["declared_id"] or note["id"],
-                actor=actor,
-                basis=[f"{source}@sha256:{digest}" for source, digest in sorted(current.items())],
-                previous_digest=sha256_text(before),
-                new_digest=sha256_text(after),
-                reason=reason,
-                metadata={"changed_sources": changed},
-            )
+        path, before, after, _ = self._rewrite(note, mutate)
+        self.operations.append(
+            "REVALIDATE",
+            note["declared_id"] or note["id"],
+            actor=actor,
+            basis=[f"{source}@sha256:{digest}" for source, digest in sorted(current.items())],
+            previous_digest=sha256_text(before),
+            new_digest=sha256_text(after),
+            reason=reason,
+            metadata={"changed_sources": changed},
+        )
         self.index.index_vault()
         return {
             "action": "revalidated",
@@ -168,28 +176,36 @@ class Lifecycle:
 
     def supersede(self, old_id: str, new_id: str, *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         """Retire ``old_id`` in favor of ``new_id``; this is how a reviewer resolves a contradiction."""
-        old, new = self._replace([old_id], [new_id], "SUPERSEDE", reason=reason, actor=actor)
-        return {"action": "superseded", "memory_id": old[0], "superseded_by": new[0]}
+        old, new, conflicts = self._replace([old_id], [new_id], "SUPERSEDE", reason=reason, actor=actor)
+        return {"action": "superseded", "memory_id": old[0], "superseded_by": new[0], "conflicts": conflicts}
 
     def merge(self, target_id: str, source_ids: list[str], *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         """Retire several overlapping memories into one reviewed ``target_id``."""
-        sources, target = self._replace(source_ids, [target_id], "MERGE", reason=reason, actor=actor)
-        return {"action": "merged", "memory_id": target[0], "merged_from": sources}
+        sources, target, conflicts = self._replace(source_ids, [target_id], "MERGE", reason=reason, actor=actor)
+        return {"action": "merged", "memory_id": target[0], "merged_from": sources, "conflicts": conflicts}
 
     def split(self, source_id: str, part_ids: list[str], *, reason: str, actor: str = "reviewer") -> dict[str, Any]:
         """Retire an overloaded memory in favor of narrower reviewed ``part_ids``."""
         if len(part_ids) < 2:
             raise ValueError("a split needs at least two parts")
-        source, parts = self._replace([source_id], part_ids, "SPLIT", reason=reason, actor=actor)
-        return {"action": "split", "memory_id": source[0], "split_into": parts}
+        source, parts, conflicts = self._replace([source_id], part_ids, "SPLIT", reason=reason, actor=actor)
+        return {"action": "split", "memory_id": source[0], "split_into": parts, "conflicts": conflicts}
 
     def _replace(
         self, retired_ids: list[str], successor_ids: list[str], operation: str, *, reason: str, actor: str
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[dict[str, str]]]:
         """Retire memories in favor of successors in one transaction, recording provenance both ways."""
         reason = _require_reason(reason)
         if not retired_ids or not successor_ids:
             raise ValueError("both retired and replacement memories are required")
+        with semantic_transaction(self.config.vault):
+            result = self._replace_locked(retired_ids, successor_ids, operation, reason=reason, actor=actor)
+        self.index.index_vault()
+        return result
+
+    def _replace_locked(
+        self, retired_ids: list[str], successor_ids: list[str], operation: str, *, reason: str, actor: str
+    ) -> tuple[list[str], list[str], list[dict[str, str]]]:
         retired = [self._note(identity) for identity in retired_ids]
         successors = [self._note(identity) for identity in successor_ids]
         rows = [note["id"] for note in retired + successors]
@@ -221,31 +237,31 @@ class Lifecycle:
             if forward != "superseded_by":
                 data[forward] = _merge_list(data.get(forward), successor_identities)
 
-        with semantic_transaction(self.config.vault):
-            for note, identity in zip(retired, retired_identities, strict=True):
-                _, before, after = self._rewrite(note, retire)
-                self.operations.append(
-                    operation,
-                    identity,
-                    actor=actor,
-                    basis=successor_identities,
-                    previous_digest=sha256_text(before),
-                    new_digest=sha256_text(after),
-                    reason=reason,
-                )
-            for note in successors:
-                self._activate(
-                    note,
-                    reason=f"{operation.lower()} of {', '.join(retired_identities)}: {reason}",
-                    actor=actor,
-                    provenance=(backward, retired_identities),
-                )
-        self.index.index_vault()
-        return retired_identities, successor_identities
+        conflicts: list[dict[str, str]] = []
+        for note, identity in zip(retired, retired_identities, strict=True):
+            _, before, after, _ = self._rewrite(note, retire)
+            self.operations.append(
+                operation,
+                identity,
+                actor=actor,
+                basis=successor_identities,
+                previous_digest=sha256_text(before),
+                new_digest=sha256_text(after),
+                reason=reason,
+            )
+        for note in successors:
+            _, moved = self._activate(
+                note,
+                reason=f"{operation.lower()} of {', '.join(retired_identities)}: {reason}",
+                actor=actor,
+                provenance=(backward, retired_identities),
+            )
+            conflicts.extend(moved)
+        return retired_identities, successor_identities, conflicts
 
     def _activate(
         self, note: dict[str, Any], *, reason: str, actor: str, provenance: tuple[str, list[str]] | None = None
-    ) -> Path:
+    ) -> tuple[Path, list[dict[str, str]]]:
         previous = note["status"]
 
         def mutate(data: dict[str, Any]) -> None:
@@ -255,7 +271,7 @@ class Lifecycle:
                 data[field] = _merge_list(data.get(field), identities)
 
         move_to = Learner.directory_for_type(str(note.get("type", "fact"))) if previous in REVIEWABLE else None
-        path, before, after = self._rewrite(note, mutate, move_to=move_to)
+        path, before, after, conflicts = self._rewrite(note, mutate, move_to=move_to)
         self.operations.append(
             "AMEND",
             note["declared_id"] or note["id"],
@@ -265,23 +281,30 @@ class Lifecycle:
             reason=reason,
             metadata={"from_status": previous, "to_status": "active"},
         )
-        return path
+        return path, conflicts
 
     def _rewrite(
         self, note: dict[str, Any], mutate: Callable[[dict[str, Any]], None], move_to: str | None = None
-    ) -> tuple[Path, str, str]:
+    ) -> tuple[Path, str, str, list[dict[str, str]]]:
         path = self.config.vault / note["path"]
         before = path.read_text(encoding="utf-8")
         parsed = parse_markdown(before)
         metadata = dict(parsed.metadata)
+        # The index detects edits by size, mtime and inode; the bytes read here are the authority.
+        on_disk = str(metadata.get("status", "active"))
+        if on_disk != note["status"]:
+            raise ValueError(
+                f"{note['declared_id'] or note['id']} changed on disk from {note['status']} to {on_disk} "
+                "while being reviewed; nothing was changed, retry"
+            )
         mutate(metadata)
         metadata["updated"] = utc_now()
         after = dump_frontmatter(metadata) + parsed.body.lstrip()
         atomic_write(path, after)
-        destination = path
         if move_to and Path(note["path"]).is_relative_to(self.config.inbox_dir):
-            destination = move_into(path, self.config.vault / move_to, note["declared_id"] or note["id"])
-        return destination, before, after
+            moved = move_into(path, self.config.vault / move_to, note["declared_id"] or note["id"])
+            return moved.destination, before, after, moved.report(self.config.vault)
+        return path, before, after, []
 
     def _note(self, memory_id: str) -> dict[str, Any]:
         self.index.index_vault()

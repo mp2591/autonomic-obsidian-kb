@@ -34,8 +34,14 @@ from autonomic_kb.query_plan import build_query_plan
 from autonomic_kb.retrieval import Retriever
 from autonomic_kb.scoring import _matches_path, classify_task, feature_vector, scope_gate
 from autonomic_kb.security import reject_secrets
-from autonomic_kb.storage import pending_transactions, resolve_transaction, semantic_files, semantic_transaction
-from autonomic_kb.util import atomic_write, sha256_file
+from autonomic_kb.storage import (
+    move_into,
+    pending_transactions,
+    resolve_transaction,
+    semantic_files,
+    semantic_transaction,
+)
+from autonomic_kb.util import atomic_write, remove_file, sha256_file
 from autonomic_kb.validation import Validator
 from tests.support import make_vault, write_memory
 
@@ -255,10 +261,11 @@ class TransactionTests(unittest.TestCase):
         renamed = write_memory(self.config, "renamed.md", "renamed", "Renamed", "renamed text")
         OperationLedger(self.config).append("ADD", "edited", new_digest="first")
         before = semantic_files(self.config.vault)
+        # Rollback undoes what the KB did, so the changes go through the KB's own write primitives.
         with self.assertRaises(RuntimeError), semantic_transaction(self.config.vault):
             atomic_write(edited, "replaced\n")
-            removed.unlink()
-            renamed.rename(self.config.vault / "moved.md")
+            remove_file(removed)
+            move_into(renamed, self.config.vault / "moved", "renamed")
             atomic_write(self.config.vault / "created.md", "new note\n")
             OperationLedger(self.config).append("AMEND", "edited", new_digest="second")
             raise RuntimeError("injected failure")
@@ -273,13 +280,13 @@ class TransactionTests(unittest.TestCase):
             atomic_write(replaced, "kb change that must be undone\n")
             with edited.open("a", encoding="utf-8") as handle:
                 handle.write("human edit saved in place by Obsidian\n")
-            atomic_write(self.config.vault / "human-new.md", "a note a human created meanwhile\n")
+            (self.config.vault / "human-new.md").write_text("a note a human created meanwhile\n")
             raise RuntimeError("injected failure")
         self.assertEqual(replaced.read_text(), original)
         self.assertIn("human edit saved in place by Obsidian", edited.read_text())
         self.assertEqual(list((self.config.vault / ".kb-transactions").glob("*.json")), [])
-        set_aside = list((self.config.vault / ".kb" / "rolled-back").rglob("human-new.md"))
-        self.assertEqual(len(set_aside), 1)
+        # The KB did not write it, so rollback leaves it in place (issue #8).
+        self.assertEqual((self.config.vault / "human-new.md").read_text(), "a note a human created meanwhile\n")
         KnowledgeIndex(self.config).index_vault()  # not blocked
 
     def _crash_inside_transaction(self, note: Path, content: str) -> None:

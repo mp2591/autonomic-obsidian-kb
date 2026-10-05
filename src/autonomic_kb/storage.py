@@ -5,14 +5,17 @@ not a security sandbox or a lock respected by Obsidian.
 
 A transaction snapshots semantic files as hard links (a copy only where the filesystem
 cannot link), so starting one costs one link per file rather than reading and journaling
-the whole vault. KB writes replace files atomically or rename them, which leaves the
-linked inode holding the before-state. Rollback restores what the KB replaced and keeps
-external in-place edits (a file that still has its recorded inode). Only a crash leaves a
-prepared journal behind; ``kb reconcile`` resolves it under owner control.
+the whole vault. While it runs, every KB write records the path and the digest of the
+bytes it left there (``util.tracked_writes``). Rollback touches only those paths: it moves
+the current file aside, restores the before-state without replacing anything, and leaves
+every other path alone. A current file that differs from what the KB wrote was changed by
+another program; it is preserved under ``.kb/rolled-back/`` and reported. Only a crash
+leaves a prepared journal behind; ``kb reconcile`` resolves it under owner control.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -22,10 +25,11 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .util import atomic_write, sha256_text, stable_json
+from .util import atomic_write, record_write, sha256_file, sha256_text, stable_json, tracked_writes, utc_now
 
 _LOCKS: dict[str, threading.RLock] = {}
 _LOCAL = threading.local()
@@ -79,6 +83,7 @@ LOCAL_COPY_DIRECTORIES = (".kb/backups",)
 LOCAL_COPY_RETENTION_DAYS = 30
 LEDGER_DIRECTORY = ".kb-memory-events"
 JOURNAL_DIRECTORY = ".kb-transactions"
+ROLLED_BACK_DIRECTORY = ".kb/rolled-back"
 
 
 def _walk(root: Path, suffix: str, *, skip_hidden: bool) -> Iterator[Path]:
@@ -131,36 +136,117 @@ def semantic_files(vault: Path) -> dict[str, str]:
     }
 
 
-def move_into(source: Path, directory: Path, identity: str) -> Path:
-    """Move ``source`` into ``directory`` without ever replacing an existing file.
+@dataclass(slots=True)
+class Moved:
+    """Where ``move_into`` put a file, and any concurrent saves it kept instead of deleting."""
 
-    A taken name gets a suffix from a hash of the note's full identity (not a prefix of it,
-    which most memory IDs share). Hard link then unlink makes the move no-clobber on
-    filesystems that support links.
-    """
-    directory.mkdir(parents=True, exist_ok=True)
-    if source.parent.resolve() == directory.resolve():
-        return source
+    destination: Path
+    conflicts: list[dict[str, str]] = field(default_factory=list)
+
+    def report(self, vault: Path) -> list[dict[str, str]]:
+        """Conflicts with paths relative to ``vault``."""
+
+        def relative(value: str) -> str:
+            try:
+                return Path(value).relative_to(vault).as_posix()
+            except ValueError:
+                return value
+
+        return [
+            {key: relative(value) if key in {"path", "kept"} else value for key, value in conflict.items()}
+            for conflict in self.conflicts
+        ]
+
+
+def _free_names(path: Path, identity: str) -> Iterator[Path]:
+    """``path`` and then names suffixed with a hash of the full identity (not a shared prefix)."""
     digest = sha256_text(identity)
-    names = [source.name]
-    names += [f"{source.stem}-{digest[:length]}{source.suffix}" for length in (8, 16, 64)]
-    names += [f"{source.stem}-{digest[:16]}-{number}{source.suffix}" for number in range(2, 1000)]
-    for name in names:
-        destination = directory / name
+    yield path
+    for length in (8, 16, 64):
+        yield path.with_name(f"{path.stem}-{digest[:length]}{path.suffix}")
+    for number in range(2, 1000):
+        yield path.with_name(f"{path.stem}-{digest[:16]}-{number}{path.suffix}")
+
+
+def _place(staged: Path, path: Path, identity: str) -> tuple[Path, bool]:
+    """Put ``staged`` at the first free name for ``path``; never replaces an existing file.
+
+    Returns the name used and whether it holds exactly the staged bytes. A hard link is the
+    same file, so it always does; a copy (where links are unsupported) can miss a write made
+    through a descriptor opened before the move.
+    """
+    for candidate in _free_names(path, identity):
         try:
-            os.link(source, destination)
+            os.link(staged, candidate)
+            return candidate, True
         except FileExistsError:
             continue
         except OSError:
             # No hard links here: copy into an exclusively created file instead of renaming,
             # because rename would replace a file an external editor created meanwhile.
             try:
-                _copy_exclusive(source, destination)
+                _copy_exclusive(staged, candidate)
             except FileExistsError:
                 continue
-        source.unlink()
-        return destination
-    raise FileExistsError(f"no free file name for {source.name} in {directory}")
+            return candidate, sha256_file(staged) == sha256_file(candidate)
+    raise FileExistsError(f"no free file name for {path.name} in {path.parent}")
+
+
+def move_into(source: Path, directory: Path, identity: str) -> Moved:
+    """Move ``source`` into ``directory`` without replacing a file or discarding a concurrent save.
+
+    The source is first renamed to a private name in its own directory, which captures
+    exactly the version at ``source`` at that instant. An editor that saves afterwards
+    re-creates ``source``; that file is never touched and is reported as a conflict.
+    The captured file is then placed under a free name (hard link, or exclusive copy where
+    links are unsupported). If a copy no longer matches the captured file, the captured
+    file is kept beside it as a conflict copy instead of being deleted.
+
+    Limits: if the rename fails nothing has changed; if placement fails the captured file
+    is put back unless ``source`` was re-created, in which case its private name is
+    reported in the error; a crash between the two steps leaves the hidden private file.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    if source.parent.resolve() == directory.resolve():
+        return Moved(source)
+    staged = source.with_name(f".{source.name}.kb-move-{uuid.uuid4().hex}")
+    os.rename(source, staged)
+    record_write(source, None)
+    try:
+        destination, exact = _place(staged, directory / source.name, identity)
+    except BaseException:
+        try:
+            _link_exclusive(staged, source)
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"could not move {source.name} and it was re-created meanwhile; the moved version is at {staged}"
+            ) from error
+        record_write(source, sha256_file(source))
+        staged.unlink()
+        raise
+    record_write(destination, sha256_file(destination))
+    moved = Moved(destination)
+    if exact:
+        staged.unlink()
+    else:
+        kept, exact = _place(staged, destination.with_name(f"{source.stem}.conflict{source.suffix}"), identity)
+        record_write(kept, sha256_file(kept))
+        if exact:
+            staged.unlink()
+        else:  # still changing: keep the private file too rather than lose a write
+            kept = staged
+        moved.conflicts.append(
+            {
+                "path": str(source),
+                "kept": str(kept),
+                "reason": "changed while it was being copied; the changed version was kept beside the moved copy",
+            }
+        )
+    if os.path.lexists(source):
+        moved.conflicts.append(
+            {"path": str(source), "reason": "re-created by another program during the move; left in place"}
+        )
+    return moved
 
 
 def _copy_exclusive(source: Path, destination: Path) -> None:
@@ -201,42 +287,194 @@ def _restore_file(saved: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
-def _set_aside(vault: Path, identity: str, relative: str) -> None:
-    """Move a file created during a failed transaction to local runtime state instead of deleting it."""
-    destination = vault / ".kb" / "rolled-back" / identity / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(vault / relative, destination)
+class _OwnedLog(dict):
+    """Tracked writes that are also appended to ``<journal>.owned``, so crash reconciliation knows them."""
+
+    def __init__(self, vault: Path, path: Path):
+        super().__init__()
+        self._root = os.path.realpath(vault)
+        self._path = path
+
+    def __setitem__(self, key: str, digest: str | None) -> None:
+        super().__setitem__(key, digest)
+        relative = _protected_relative(self._root, key)
+        if relative is not None:
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps([relative, digest]) + "\n")
 
 
-def _restore(vault: Path, identity: str, snapshot: Path, files: dict[str, list[int]]) -> list[str]:
-    """Undo KB changes; return files whose before-state is missing from the snapshot.
-
-    KB writes replace files (new inode) or rename them. A file that still has its
-    recorded inode was never replaced by the transaction, so any change to it is an
-    external in-place edit (for example Obsidian saving) and is kept.
-    """
-    unavailable: list[str] = []
-    for path in semantic_paths(vault):
-        relative = path.relative_to(vault).as_posix()
-        if relative not in files:
-            _set_aside(vault, identity, relative)
-    for relative, recorded in sorted(files.items()):
-        saved = snapshot / relative
-        target = vault / relative
-        inode = recorded[2] if len(recorded) > 2 else None
+def _owned_paths(journal: Path) -> dict[str, str | None] | None:
+    """What a transaction recorded writing before it stopped, or None for journals without a log."""
+    path = journal.with_suffix(".owned")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    owned: dict[str, str | None] = {}
+    for line in lines:
         try:
-            current = target.stat()
-        except FileNotFoundError:
-            current = None
-        if current is not None and inode is not None and current.st_ino == inode:
+            relative, digest = json.loads(line)
+        except (ValueError, TypeError):
+            continue  # a line cut short by the crash
+        if isinstance(relative, str) and (digest is None or isinstance(digest, str)):
+            owned[relative] = digest
+    return owned
+
+
+def _protected_relative(root: str, key: str) -> str | None:
+    """Vault-relative path when ``key`` names a file transactions protect (see ``semantic_paths``)."""
+    try:
+        relative = PurePosixPath(Path(key).relative_to(root).as_posix())
+    except ValueError:
+        return None
+    parts = relative.parts
+    if len(parts) > 1 and parts[0] == LEDGER_DIRECTORY:
+        return relative.as_posix() if relative.suffix == ".json" else None
+    if not parts or relative.suffix != ".md" or any(part.startswith(".") for part in parts):
+        return None
+    if any(part in EXCLUDED_DIRECTORIES for part in parts[:-1]):
+        return None
+    return relative.as_posix()
+
+
+def _capture(target: Path, kept: Path) -> bool:
+    """Atomically move whatever is at ``target`` to ``kept``; False when nothing was there."""
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(target, kept)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        if error.errno != errno.EXDEV:
+            raise
+        sibling = target.with_name(f".{target.name}.kb-rollback-{uuid.uuid4().hex}")
+        os.rename(target, sibling)  # same directory, so same filesystem
+        shutil.copy2(sibling, kept)
+        sibling.unlink()
+    return True
+
+
+def _link_exclusive(source: Path, destination: Path) -> None:
+    """Make ``destination`` a link to (or exclusive copy of) ``source``; raise FileExistsError if taken."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination)
+    except FileExistsError:
+        raise
+    except OSError:
+        _copy_exclusive(source, destination)
+
+
+def _rollback(
+    vault: Path, identity: str, snapshot: Path, files: dict[str, list[int]], owned: dict[str, str | None]
+) -> tuple[list[str], list[str], list[dict[str, str]]]:
+    """Undo the transaction's own writes; never delete or replace a file.
+
+    Only paths the transaction wrote or removed are touched. For each, the current file
+    is moved under ``.kb/rolled-back/<transaction>/`` and the before-state is linked back
+    without replacing anything. A moved file whose bytes differ from the KB's last write
+    for that path was changed by another program after the KB wrote it: a conflict.
+    Returns (before-states missing from the snapshot, files set aside, conflicts).
+    """
+    root = os.path.realpath(vault)
+    holding = vault / ROLLED_BACK_DIRECTORY / identity
+    unavailable: list[str] = []
+    set_aside: list[str] = []
+    conflicts: list[dict[str, str]] = []
+    for key, expected in sorted(owned.items()):
+        relative = _protected_relative(root, key)
+        if relative is None:
             continue
-        if current is not None and saved.exists() and os.path.samefile(saved, target):
+        target = vault / relative
+        kept = holding / relative
+        if _capture(target, kept):
+            preserved = kept.relative_to(vault).as_posix()
+            if expected is not None and sha256_file(kept) == expected:
+                set_aside.append(preserved)
+            else:
+                reason = (
+                    "changed by another program after the KB wrote it"
+                    if expected
+                    else "created by another program after the KB removed it"
+                )
+                conflicts.append({"path": relative, "preserved": preserved, "reason": reason})
+        if relative not in files:
+            record_write(target, None)  # for an enclosing transaction
             continue
+        saved = snapshot / relative
         if not saved.exists():
             unavailable.append(relative)
             continue
-        _restore_file(saved, target)
-    return unavailable
+        try:
+            _link_exclusive(saved, target)
+            record_write(target, sha256_file(target))
+        except FileExistsError:
+            # Saved again while rolling back: keep that save, and the before-state beside the conflicts.
+            before, _ = _place(saved, holding / f"{relative}.before", identity)
+            conflicts.append(
+                {
+                    "path": relative,
+                    "preserved": before.relative_to(vault).as_posix(),
+                    "reason": "saved by another program during rollback; kept, with the before-state preserved",
+                }
+            )
+    return unavailable, set_aside, conflicts
+
+
+def _record_rollback(
+    vault: Path, identity: str, error: BaseException, set_aside: list[str], conflicts: list[dict[str, str]]
+) -> None:
+    """Write a manifest for the files a rollback moved aside; conflicts stay listed until acknowledged."""
+    if not set_aside and not conflicts:
+        return
+    record = {
+        "transaction": identity,
+        "created": utc_now(),
+        "error": type(error).__name__,
+        "set_aside": set_aside,
+        "conflicts": conflicts,
+        "acknowledged": not conflicts,
+    }
+    atomic_write(vault / ROLLED_BACK_DIRECTORY / identity / "rollback.json", json.dumps(record, indent=2) + "\n")
+    if conflicts:
+        files = ", ".join(f"{item['path']} -> {item['preserved']}" for item in conflicts)
+        error.add_note(
+            f"rollback preserved {len(conflicts)} file(s) another program changed: {files}; "
+            f"see `kb reconcile`, then `kb reconcile {identity} --acknowledge`"
+        )
+
+
+def rollback_conflicts(vault: Path) -> list[dict[str, Any]]:
+    """Rollbacks that preserved files changed by another program and have not been acknowledged."""
+    rows = []
+    for path in sorted((vault / ROLLED_BACK_DIRECTORY).glob("*/rollback.json")):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(row, dict) and row.get("conflicts") and not row.get("acknowledged"):
+            rows.append(row)
+    return sorted(rows, key=lambda row: str(row.get("created", "")))
+
+
+def acknowledge_rollback(vault: Path, transaction: str) -> dict[str, Any]:
+    """Mark a rollback's conflicts reviewed; the preserved files are left where they are."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", transaction):
+        raise ValueError("invalid transaction identity")
+    with vault_lock(vault):
+        path = vault / ROLLED_BACK_DIRECTORY / transaction / "rollback.json"
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as error:
+            raise ValueError(f"no rollback record for transaction {transaction}") from error
+        row["acknowledged"] = True
+        row["acknowledged_at"] = utc_now()
+        atomic_write(path, json.dumps(row, indent=2) + "\n")
+    return {
+        "transaction": transaction,
+        "acknowledged": True,
+        "preserved": [item["preserved"] for item in row.get("conflicts", [])],
+    }
 
 
 def _contained(root: Path, relative: Any) -> Path | None:
@@ -265,6 +503,7 @@ def _journals(vault: Path) -> list[tuple[Path, dict[str, Any]]]:
 
 def _discard(journal: Path) -> None:
     journal.unlink(missing_ok=True)
+    journal.with_suffix(".owned").unlink(missing_ok=True)
     shutil.rmtree(journal.with_suffix(""), ignore_errors=True)
 
 
@@ -325,14 +564,23 @@ def pending_transactions(vault: Path) -> list[dict[str, Any]]:
             known = set(recorded)
         for relative in sorted(current - known):
             files[relative] = "new"
-        result.append(
-            {
-                "journal": path.stem,
-                "format": "inline" if "before" in row else "snapshot",
-                "files": {key: value for key, value in sorted(files.items()) if value != "unchanged"},
-                "unchanged": sum(value == "unchanged" for value in files.values()),
-            }
-        )
+        entry: dict[str, Any] = {
+            "journal": path.stem,
+            "format": "inline" if "before" in row else "snapshot",
+            "files": {key: value for key, value in sorted(files.items()) if value != "unchanged"},
+            "unchanged": sum(value == "unchanged" for value in files.values()),
+        }
+        owned = _owned_paths(path)
+        if owned is not None:
+            # Only these paths were written by the interrupted transaction; restore-snapshot
+            # leaves every other change in place.
+            entry["kb_written"] = sorted(owned)
+            entry["external"] = sorted(
+                relative
+                for relative, state in entry["files"].items()
+                if relative not in owned and state != "rejected-path"
+            )
+        result.append(entry)
     return result
 
 
@@ -361,6 +609,11 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
             )
         restored: list[str] = []
         unavailable: list[str] = []
+        kept_external: list[str] = []
+        conflicts: list[dict[str, str]] = []
+        deleted: list[str] = []
+        owned = _owned_paths(path)
+        holding = vault / ROLLED_BACK_DIRECTORY / journal
         new = sorted(relative for relative, state in status.items() if state == "new")
         if mode == "restore-snapshot":
             before = row.get("before")
@@ -369,15 +622,41 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
                     if state in {"unavailable", "missing-unavailable"}:
                         unavailable.append(relative)
                     continue
+                if owned is not None and relative not in owned:
+                    kept_external.append(relative)  # the KB never wrote it; another program did
+                    continue
                 target = vault / relative
                 if before is not None:
                     atomic_write(target, before[relative])
+                    restored.append(relative)
+                    continue
+                if owned is not None and state == "changed" and sha256_file(target) != owned[relative]:
+                    # Changed again after the KB wrote it: keep that version before restoring.
+                    kept = holding / relative
+                    if _capture(target, kept):
+                        preserved = kept.relative_to(vault).as_posix()
+                        reason = "changed by another program after the interrupted KB write"
+                        conflicts.append({"path": relative, "preserved": preserved, "reason": reason})
+                    try:
+                        _link_exclusive(path.with_suffix("") / relative, target)
+                    except FileExistsError:
+                        kept_external.append(relative)
+                        continue
                 else:
                     _restore_file(path.with_suffix("") / relative, target)
                 restored.append(relative)
             if delete_new:
                 for relative in new:
-                    (vault / relative).unlink(missing_ok=True)
+                    target = vault / relative
+                    if owned is not None and (relative not in owned or sha256_file(target) != owned[relative]):
+                        kept_external.append(relative)  # created or changed by another program: never deleted
+                        continue
+                    target.unlink(missing_ok=True)
+                    deleted.append(relative)
+        if conflicts:
+            record = {"transaction": journal, "created": utc_now(), "error": "reconcile", "set_aside": []}
+            record.update(conflicts=conflicts, acknowledged=False)
+            atomic_write(holding / "rollback.json", json.dumps(record, indent=2) + "\n")
         _discard(path)
         return {
             "journal": journal,
@@ -385,7 +664,10 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
             "restored": sorted(restored),
             "unavailable": sorted(unavailable),
             "new_files": new,
-            "new_files_deleted": bool(delete_new and mode == "restore-snapshot"),
+            "new_files_deleted": bool(deleted),
+            "deleted": sorted(deleted),
+            "kept_external": sorted(set(kept_external)),
+            "conflicts": conflicts,
         }
 
 
@@ -443,10 +725,13 @@ def semantic_transaction(vault: Path):
             raise
         active = getattr(_LOCAL, "transactions", set())
         _LOCAL.transactions = active | {str(vault.resolve())}
+        owned = _OwnedLog(vault, journal.with_suffix(".owned"))
         try:
-            yield
-        except BaseException:
-            unavailable = _restore(vault, identity, snapshot, files)
+            with tracked_writes(owned):
+                yield
+        except BaseException as error:
+            unavailable, set_aside, conflicts = _rollback(vault, identity, snapshot, files, owned)
+            _record_rollback(vault, identity, error, set_aside, conflicts)
             if unavailable:
                 row = {"state": "prepared", "snapshot": identity, "files": files, "unavailable": unavailable}
                 atomic_write(journal, stable_json(row))
