@@ -31,7 +31,7 @@ from .retrieval import Retriever
 from .scoring import AUTHORITY
 from .security import TAINT_ORDER
 from .shadow import ShadowEvaluator
-from .storage import pending_transactions, resolve_transaction
+from .storage import acknowledge_rollback, pending_transactions, resolve_transaction, rollback_conflicts
 from .telemetry import TaskOutcome, TelemetryStore
 from .util import sha256_text, utc_now
 from .validation import Validator
@@ -157,11 +157,18 @@ def build_parser() -> argparse.ArgumentParser:
     split.add_argument("source_id")
     split.add_argument("part_ids", nargs="+")
     split.add_argument("--reason", required=True)
-    reconcile = commands.add_parser("reconcile", help="inspect or resolve an interrupted transaction")
-    reconcile.add_argument("journal", nargs="?", help="journal to resolve; omit to list interrupted transactions")
+    reconcile = commands.add_parser(
+        "reconcile", help="inspect or resolve an interrupted transaction or a rollback that preserved conflicts"
+    )
+    reconcile.add_argument(
+        "journal", nargs="?", help="journal or rolled-back transaction to resolve; omit to list both"
+    )
     reconcile_mode = reconcile.add_mutually_exclusive_group()
     reconcile_mode.add_argument("--accept-current", action="store_true", help="keep the vault as it is now")
     reconcile_mode.add_argument("--restore-snapshot", action="store_true", help="restore the before-state")
+    reconcile_mode.add_argument(
+        "--acknowledge", action="store_true", help="mark a rollback's preserved conflicts reviewed (changes no note)"
+    )
     reconcile.add_argument("--delete-new", action="store_true", help="also delete files created since the crash")
     reconcile.add_argument("--yes", action="store_true")
     queue = commands.add_parser("validation-queue")
@@ -477,7 +484,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "reconcile":
             if not args.journal:
-                _emit({"interrupted": pending_transactions(config.vault)}, args.json)
+                listing = {
+                    "interrupted": pending_transactions(config.vault),
+                    "rollback_conflicts": rollback_conflicts(config.vault),
+                }
+                _emit(listing, args.json)
+                return 0
+            if args.acknowledge:
+                _emit(acknowledge_rollback(config.vault, args.journal), args.json)
                 return 0
             if not (args.accept_current or args.restore_snapshot):
                 raise ValueError("choose --accept-current or --restore-snapshot")
@@ -666,10 +680,13 @@ def main(argv: list[str] | None = None) -> int:
             _emit(ShadowEvaluator(config).compare(args.task, args.route, args.budget, args.path), args.json)
             return 0
     except (FileNotFoundError, FileExistsError, ValueError, sqlite3.Error) as error:
+        # Notes carry what a rollback preserved; they must reach the person running the command.
+        notes = list(getattr(error, "__notes__", []))
         if args.json:
-            _emit({"error": type(error).__name__, "message": str(error)}, True)
+            _emit({"error": type(error).__name__, "message": str(error), "notes": notes}, True)
         else:
-            print(f"kb: {error}", file=sys.stderr)
+            for line in [str(error), *notes]:
+                print(f"kb: {line}", file=sys.stderr)
         return 2
     return 0
 
@@ -771,6 +788,16 @@ def _doctor(config: KBConfig) -> dict[str, Any]:
             "ok": obsidian.vault_responsive,
             "optional": True,
             "detail": obsidian.error or obsidian.version,
+        }
+    )
+    conflicts = rollback_conflicts(config.vault)
+    checks.append(
+        {
+            "check": "rollback-conflicts",
+            "ok": not conflicts,
+            "detail": "none"
+            if not conflicts
+            else f"{len(conflicts)} rollback(s) preserved files another program changed; see `kb reconcile`",
         }
     )
     evidence = EvidenceStore(config)

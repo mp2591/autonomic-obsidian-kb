@@ -199,7 +199,7 @@ class NoClobberMoveTests(unittest.TestCase):
             patch("autonomic_kb.storage.os.link", side_effect=PermissionError("links unsupported")),
             patch.object(Path, "exists", racing_exists),
         ):
-            moved = move_into(source, directory, "kb:global:fact:note")
+            moved = move_into(source, directory, "kb:global:fact:note").destination
         self.assertEqual(existing.read_text(), "created by an external editor\n")
         self.assertNotEqual(moved, existing)
         self.assertEqual(moved.read_text(), "moving note\n")

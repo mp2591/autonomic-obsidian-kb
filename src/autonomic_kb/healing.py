@@ -11,8 +11,12 @@ from .index import KnowledgeIndex
 from .markdown import dump_frontmatter, parse_markdown
 from .security import redact_secrets, redact_value
 from .storage import move_into, semantic_transaction, vault_markdown_paths
-from .util import age_days, atomic_write, jaccard, sha256_text, slugify, utc_now
-from .validation import ValidationReport, Validator
+from .util import age_days, atomic_write, jaccard, remove_file, sha256_text, slugify, utc_now
+from .validation import INACTIVE_STATUSES, ValidationReport, Validator
+
+# Review states: freshness maintenance may annotate them but never changes their status,
+# because a status change here would move a candidate past review (``stale`` is retrievable).
+UNREVIEWED_STATUSES = {"inbox", "conflicted"}
 
 
 @dataclass(slots=True)
@@ -48,12 +52,18 @@ class Healer:
 
     def heal(self, apply: bool = False) -> dict[str, Any]:
         validator = Validator(self.config, self.index)
-        before = validator.validate()
-        actions = self.plan(before)
+        actions: list[HealingAction] = []
         rolled_back = False
-        if apply:
+        rollback: dict[str, Any] | None = None
+        if not apply:
+            before = validator.validate()
+            actions = self.plan(before)
+        else:
             try:
                 with semantic_transaction(self.config.vault):
+                    # Validate and plan under the writer lock, so the plan matches what is applied.
+                    before = validator.validate()
+                    actions = self.plan(before)
                     for action in actions:
                         if action.safe:
                             self._apply(action)
@@ -75,8 +85,10 @@ class Healer:
                     }
                     if new_errors - old_errors:
                         raise _HealingRegression("healing introduced a new validation error")
-            except _HealingRegression:
+            except _HealingRegression as error:
                 rolled_back = True
+                # A rollback can preserve a version another program saved meanwhile; say so here too.
+                rollback = getattr(error, "kb_rollback", None)
                 for action in actions:
                     action.applied = False
             finally:
@@ -88,6 +100,7 @@ class Healer:
             "actions": [action.to_dict() for action in actions],
             "applied": sum(action.applied for action in actions),
             "rolled_back": rolled_back,
+            "rollback": rollback,
         }
         self.index.events.emit(
             "heal.completed", mode=result["mode"], applied=result["applied"], rolled_back=rolled_back
@@ -163,11 +176,21 @@ class Healer:
         path = self.config.vault / action.path
         if not path.exists():
             return None
-        backup = self._backup(action.path)
         before = path.read_text(encoding="utf-8")
         parsed = parse_markdown(before)
         metadata = dict(parsed.metadata)
         memory_id = str(metadata.get("id", ""))
+        status = str(metadata.get("status", "active"))
+        if action.action == "mark-stale":
+            if status in INACTIVE_STATUSES:
+                action.details["skipped"] = f"{status} memories are retired; freshness is not maintained"
+                return None
+            if metadata.get("freshness") == "stale" and (status in UNREVIEWED_STATUSES or status == "stale"):
+                # Marking is idempotent: re-applying it on every heal would only keep lowering
+                # confidence and appending ledger operations for the same finding.
+                action.details["skipped"] = "already marked stale"
+                return None
+        backup = self._backup(action.path)
         now = utc_now()
         if action.action == "repair-metadata":
             defaults: dict[str, Any] = {
@@ -189,13 +212,17 @@ class Healer:
             atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
             action.applied = True
         elif action.action == "mark-stale":
-            metadata["status"] = "stale"
+            # Only reviewed knowledge changes status. An inbox or conflicted candidate keeps its
+            # status and just records that its sources look stale for the reviewer.
             metadata["freshness"] = "stale"
             metadata["updated"] = now
-            try:
-                metadata["confidence"] = round(max(0.2, float(metadata.get("confidence", 0.5)) * 0.8), 3)
-            except (TypeError, ValueError):
-                metadata["confidence"] = 0.4
+            if status not in UNREVIEWED_STATUSES:
+                metadata["status"] = "stale"
+                try:
+                    metadata["confidence"] = round(max(0.2, float(metadata.get("confidence", 0.5)) * 0.8), 3)
+                except (TypeError, ValueError):
+                    metadata["confidence"] = 0.4
+            action.details["status"] = metadata["status"]
             atomic_write(path, dump_frontmatter(metadata) + parsed.body.lstrip())
             action.applied = True
         elif action.action == "repair-link":
@@ -213,9 +240,11 @@ class Healer:
             metadata["freshness"] = "untrusted"
             metadata["updated"] = now
             atomic_write(path, dump_frontmatter(metadata) + body.lstrip())
-            destination = move_into(path, self.config.vault / self.config.quarantine_dir, memory_id or action.path)
-            if destination != path:
-                action.details["destination"] = destination.relative_to(self.config.vault).as_posix()
+            moved = move_into(path, self.config.vault / self.config.quarantine_dir, memory_id or action.path)
+            if moved.destination != path:
+                action.details["destination"] = moved.destination.relative_to(self.config.vault).as_posix()
+            if moved.conflicts:
+                action.details["conflicts"] = moved.report(self.config.vault)
             action.applied = True
         if action.applied:
             current_path = (
@@ -258,6 +287,39 @@ class Compactor:
             self.index.close()
 
     def compact(self, apply: bool = False) -> dict[str, Any]:
+        applied = 0
+        if not apply:
+            candidates = self._candidates()
+        else:
+            with semantic_transaction(self.config.vault):
+                # Plan under the writer lock, so a note promoted or revalidated meanwhile is not archived.
+                candidates = self._candidates()
+                for candidate in candidates:
+                    source = self.config.vault / candidate["path"]
+                    if not source.exists():
+                        continue
+                    destination, before, after, conflicts = _archive(
+                        self.config, source, candidate["id"], superseded_by=candidate.get("winner", "")
+                    )
+                    self.operations.append(
+                        "ARCHIVE",
+                        candidate["id"],
+                        actor="compactor",
+                        previous_digest=sha256_text(before),
+                        new_digest=sha256_text(after),
+                        reason=candidate["reason"],
+                    )
+                    candidate["applied"] = True
+                    candidate["destination"] = destination.relative_to(self.config.vault).as_posix()
+                    if conflicts:
+                        candidate["conflicts"] = conflicts
+                    applied += 1
+            self.index.index_vault()
+        result = {"mode": "apply" if apply else "dry-run", "candidates": candidates, "applied": applied}
+        self.index.events.emit("compact.completed", mode=result["mode"], candidates=len(candidates), applied=applied)
+        return result
+
+    def _candidates(self) -> list[dict[str, Any]]:
         self.index.index_vault()
         notes = self.index.all_notes({"active", "inbox", "stale", "superseded"})
         candidates: list[dict[str, Any]] = []
@@ -309,35 +371,13 @@ class Compactor:
                             "action": "archive",
                         }
                     )
-        applied = 0
-        if apply:
-            with semantic_transaction(self.config.vault):
-                for candidate in candidates:
-                    source = self.config.vault / candidate["path"]
-                    if not source.exists():
-                        continue
-                    destination, before, after = _archive(
-                        self.config, source, candidate["id"], superseded_by=candidate.get("winner", "")
-                    )
-                    self.operations.append(
-                        "ARCHIVE",
-                        candidate["id"],
-                        actor="compactor",
-                        previous_digest=sha256_text(before),
-                        new_digest=sha256_text(after),
-                        reason=candidate["reason"],
-                    )
-                    candidate["applied"] = True
-                    candidate["destination"] = destination.relative_to(self.config.vault).as_posix()
-                    applied += 1
-            self.index.index_vault()
-        result = {"mode": "apply" if apply else "dry-run", "candidates": candidates, "applied": applied}
-        self.index.events.emit("compact.completed", mode=result["mode"], candidates=len(candidates), applied=applied)
-        return result
+        return candidates
 
 
-def _archive(config: KBConfig, source: Path, memory_id: str, superseded_by: str = "") -> tuple[Path, str, str]:
-    """Mark a note archived and move it into the archive directory with atomic writes."""
+def _archive(
+    config: KBConfig, source: Path, memory_id: str, superseded_by: str = ""
+) -> tuple[Path, str, str, list[dict[str, str]]]:
+    """Mark a note archived and move it into the archive directory; return any move conflicts."""
     before = source.read_text(encoding="utf-8")
     parsed = parse_markdown(before)
     metadata = dict(parsed.metadata)
@@ -347,27 +387,29 @@ def _archive(config: KBConfig, source: Path, memory_id: str, superseded_by: str 
         metadata["superseded_by"] = superseded_by
     after = dump_frontmatter(metadata) + parsed.body.lstrip()
     atomic_write(source, after)
-    destination = move_into(source, config.vault / config.archive_dir, memory_id)
-    return destination, before, after
+    moved = move_into(source, config.vault / config.archive_dir, memory_id)
+    return moved.destination, before, after, moved.report(config.vault)
 
 
 def forget(config: KBConfig, memory_id: str, hard: bool = False) -> dict[str, Any]:
     with KnowledgeIndex(config) as index:
-        index.index_vault()
-        note = index.get(memory_id)
-        if not note:
-            return {"action": "not-found", "memory_id": memory_id}
-        declarers = [row for row in index.all_notes() if row["declared_id"] == note["declared_id"]]
-        if len(declarers) > 1:
-            raise ValueError(
-                f"{memory_id} is declared by {len(declarers)} notes; resolve the duplicate identity first"
-            )
-        path = config.vault / note["path"]
         ledger = OperationLedger(config)
+        conflicts: list[dict[str, str]] = []
         with semantic_transaction(config.vault):
+            # Resolve the note under the writer lock; a reviewer may have moved or retired it meanwhile.
+            index.index_vault()
+            note = index.get(memory_id)
+            if not note:
+                return {"action": "not-found", "memory_id": memory_id}
+            declarers = [row for row in index.all_notes() if row["declared_id"] == note["declared_id"]]
+            if len(declarers) > 1:
+                raise ValueError(
+                    f"{memory_id} is declared by {len(declarers)} notes; resolve the duplicate identity first"
+                )
+            path = config.vault / note["path"]
             before = path.read_text(encoding="utf-8") if path.exists() else ""
             if hard:
-                path.unlink(missing_ok=True)
+                remove_file(path)
                 action = "deleted"
                 destination = ""
                 ledger.append(
@@ -378,7 +420,7 @@ def forget(config: KBConfig, memory_id: str, hard: bool = False) -> dict[str, An
                     reason="explicit hard delete",
                 )
             else:
-                target, before, after = _archive(config, path, memory_id)
+                target, before, after, conflicts = _archive(config, path, memory_id)
                 destination = target.relative_to(config.vault).as_posix()
                 action = "archived"
                 ledger.append(
@@ -391,4 +433,4 @@ def forget(config: KBConfig, memory_id: str, hard: bool = False) -> dict[str, An
                 )
         index.index_vault()
         index.events.emit("memory.forgotten", memory_id=memory_id, action=action, destination=destination)
-        return {"action": action, "memory_id": memory_id, "destination": destination}
+        return {"action": action, "memory_id": memory_id, "destination": destination, "conflicts": conflicts}

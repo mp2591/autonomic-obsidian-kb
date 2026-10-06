@@ -34,7 +34,7 @@ V3 preserves the original invariants—Markdown authority, disposable indexes, h
 - **Task-planned context compilation** selects whole representations and preserves commands, preconditions, and verification without unsafe sentence splicing.
 - **Temporal, version, and source gates** check declared applicability; Git ancestry alone is not continuing validity.
 - **Non-executable validation** checks schema, evidence, file existence, and source hashes. Note-defined command execution is disabled.
-- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, merge, split, migrate) snapshot notes and events as hard links. On a handled failure they restore what the KB replaced and keep external in-place edits, such as Obsidian saving a note; files created meanwhile are set aside under `.kb/rolled-back/` and kept until you remove them. Only a crashed process leaves a blocking journal, which `kb reconcile` resolves under owner control.
+- **Transactional semantic writes** (remember, heal, compact, forget, promote, revalidate, supersede, merge, split, migrate) snapshot notes and events as hard links and log every path the KB writes, before the write lands, together with the version that was there (which may be a save another program made after the transaction began). On a handled failure, rollback touches only those paths: it moves the KB's output under `.kb/rolled-back/` (kept until you remove it) and links that version back without replacing or deleting a file. Notes the KB never wrote stay as they are; if another program changed a file after the KB wrote it, that version is preserved under `.kb/rolled-back/`, attached to the error, and listed by `kb reconcile` until acknowledged. Moves never delete a concurrent save: a note re-saved during a move stays in place and is reported. A crash, or a rollback that could not finish, leaves a blocking journal; `kb reconcile --restore-snapshot` then runs the same rollback from the write log.
 - **Reviewer lifecycle** (`kb inbox`, `kb promote`, `kb revalidate`, `kb supersede`, `kb merge`, `kb split`) is the explicit gate between agent-submitted candidates and retrievable knowledge; it is CLI-only, and every command requires a reason.
 - **Episodic capture and recurrence consolidation** prevent every observation from becoming canonical memory.
 - **Multi-agent leases** reduce duplicate investigations.
@@ -195,10 +195,13 @@ kb validate
 kb validation-queue
 kb heal             # dry-run
 kb heal --apply     # backup + apply + post-validation + rollback on regression
-kb reconcile        # list or resolve a transaction interrupted by a crash
+kb reconcile        # list crashed transactions and rollbacks that preserved conflicting saves
+kb reconcile <id> --acknowledge   # mark a rollback's preserved files reviewed
 ```
 
 Quarantine redacts secret values (keys stay readable, private-key blocks are removed) in the vault copy; the unredacted original stays only in the local `.kb/backups/`, which the vault `.gitignore` written by `kb init` excludes. Backup sets older than 30 days are removed when the next write starts. Rotate any credential that was ever committed, because Git history keeps it.
+
+Stale marking changes status only for reviewed notes: an `inbox` or `conflicted` candidate keeps its status (its `freshness` records the stale source), and archived, superseded, retracted and quarantined notes are left alone, so healing never moves a note past review or back into retrieval.
 
 Validator types include repository-contained file existence and source hashes. All note-defined command validators are rejected without execution, including formerly allowlisted commands.
 

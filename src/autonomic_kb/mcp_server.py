@@ -265,7 +265,8 @@ class MCPServer:
                 value = self.call_tool(name, dict(params.get("arguments", {})))
             except Exception as error:
                 # Tool failures are results the model can read and correct, not protocol errors.
-                return self._result(request_id, {"content": [{"type": "text", "text": str(error)}], "isError": True})
+                text = "\n".join([str(error), *getattr(error, "__notes__", [])])
+                return self._result(request_id, {"content": [{"type": "text", "text": text}], "isError": True})
             return self._result(request_id, {"content": [{"type": "text", "text": stable_json(value)}]})
         if method == "ping":
             return self._result(request_id, {})

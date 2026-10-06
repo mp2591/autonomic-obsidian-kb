@@ -25,7 +25,7 @@ from autonomic_kb.retrieval import Retriever
 from autonomic_kb.scoring import scope_gate, temporal_gate
 from autonomic_kb.security import trust_gate
 from autonomic_kb.shadow import ShadowEvaluator
-from autonomic_kb.storage import recover_transactions, semantic_files, semantic_transaction
+from autonomic_kb.storage import move_into, recover_transactions, semantic_files, semantic_transaction
 from autonomic_kb.telemetry import TaskOutcome, TelemetryStore
 from autonomic_kb.tokenizer import TOKENIZERS
 from autonomic_kb.util import sha256_file, stable_json
@@ -259,7 +259,7 @@ class V3Contracts(unittest.TestCase):
         path = self.note()
         before = semantic_files(self.config.vault)
         with self.assertRaises(RuntimeError), semantic_transaction(self.config.vault):
-            path.rename(self.config.vault / "moved.md")
+            move_into(path, self.config.vault / "moved", "one")  # the KB moves notes only through move_into
             OperationLedger(self.config).append("AMEND", "one", new_digest="changed")
             raise RuntimeError("injected failure")
         self.assertEqual(semantic_files(self.config.vault), before)
