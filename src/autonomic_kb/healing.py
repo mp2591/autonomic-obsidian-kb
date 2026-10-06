@@ -54,6 +54,7 @@ class Healer:
         validator = Validator(self.config, self.index)
         actions: list[HealingAction] = []
         rolled_back = False
+        rollback: dict[str, Any] | None = None
         if not apply:
             before = validator.validate()
             actions = self.plan(before)
@@ -84,8 +85,10 @@ class Healer:
                     }
                     if new_errors - old_errors:
                         raise _HealingRegression("healing introduced a new validation error")
-            except _HealingRegression:
+            except _HealingRegression as error:
                 rolled_back = True
+                # A rollback can preserve a version another program saved meanwhile; say so here too.
+                rollback = getattr(error, "kb_rollback", None)
                 for action in actions:
                     action.applied = False
             finally:
@@ -97,6 +100,7 @@ class Healer:
             "actions": [action.to_dict() for action in actions],
             "applied": sum(action.applied for action in actions),
             "rolled_back": rolled_back,
+            "rollback": rollback,
         }
         self.index.events.emit(
             "heal.completed", mode=result["mode"], applied=result["applied"], rolled_back=rolled_back
@@ -181,8 +185,10 @@ class Healer:
             if status in INACTIVE_STATUSES:
                 action.details["skipped"] = f"{status} memories are retired; freshness is not maintained"
                 return None
-            if status in UNREVIEWED_STATUSES and metadata.get("freshness") == "stale":
-                action.details["skipped"] = f"already marked stale; {status} awaits review"
+            if metadata.get("freshness") == "stale" and (status in UNREVIEWED_STATUSES or status == "stale"):
+                # Marking is idempotent: re-applying it on every heal would only keep lowering
+                # confidence and appending ledger operations for the same finding.
+                action.details["skipped"] = "already marked stale"
                 return None
         backup = self._backup(action.path)
         now = utc_now()

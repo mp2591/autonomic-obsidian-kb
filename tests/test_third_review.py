@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,7 +30,8 @@ from autonomic_kb.markdown import parse_markdown
 from autonomic_kb.mcp_server import MCPServer
 from autonomic_kb.retrieval import Retriever
 from autonomic_kb.storage import move_into, semantic_transaction
-from autonomic_kb.util import atomic_write
+from autonomic_kb.util import atomic_write, remove_file
+from autonomic_kb.validation import ValidationIssue, Validator
 from tests.support import make_vault, write_memory
 
 
@@ -123,6 +125,98 @@ class RollbackOwnershipTests(unittest.TestCase):
         self.assertEqual(storage.rollback_conflicts(self.vault), [])
         self.assertIn("human save on top", _every_file_text(self.vault / ".kb" / "rolled-back"))
 
+    def test_save_made_after_the_snapshot_is_what_rollback_restores(self):
+        note = write_memory(
+            self.config, "facts/note.md", "kb:global:fact:note", "Note", "Original fact", scope="global"
+        )
+        saved = note.read_text() + "Editor line saved after the transaction began.\n"
+        real_snapshot = storage._snapshot
+
+        def snapshot_then_editor_saves(vault, snapshot):
+            files = real_snapshot(vault, snapshot)
+            _editor_atomic_save(note, saved)  # before the KB reads and rewrites the note
+            return files
+
+        lifecycle = Lifecycle(self.config)
+        try:
+            with (
+                patch("autonomic_kb.storage._snapshot", side_effect=snapshot_then_editor_saves),
+                patch.object(OperationLedger, "append", side_effect=OSError(errno.ENOSPC, "No space left")),
+                self.assertRaises(OSError),
+            ):
+                lifecycle.revalidate("kb:global:fact:note", reason="still holds")
+        finally:
+            lifecycle.close()
+        self.assertEqual(note.read_text(), saved)  # the version the KB replaced, byte for byte
+        self.assertEqual(storage.rollback_conflicts(self.vault), [])
+
+    def test_rollback_does_not_bring_back_a_note_deleted_before_the_kb_removed_it(self):
+        for removal in ("remove_file", "move_into"):
+            with self.subTest(removal=removal):
+                note = write_memory(self.config, f"{removal}.md", removal, "Deleted", "deleted by a person")
+                with self.assertRaises((RuntimeError, FileNotFoundError)), semantic_transaction(self.vault):
+                    note.unlink()  # a person deletes it after the transaction began
+                    if removal == "remove_file":
+                        remove_file(note)
+                    else:
+                        move_into(note, self.vault / self.config.archive_dir, removal)
+                    raise RuntimeError("injected failure")
+                self.assertFalse(note.exists())
+
+    def test_a_rollback_that_fails_part_way_keeps_what_it_preserved_and_the_journal(self):
+        first = write_memory(self.config, "a.md", "a", "A", "before a")
+        second = write_memory(self.config, "b.md", "b", "B", "before b")
+        originals = (first.read_text(), second.read_text())
+        real_link_exclusive = storage._link_exclusive
+
+        def failing_for_second(source, destination):
+            if Path(destination).name == "b.md":
+                raise OSError(errno.EIO, "I/O error")
+            return real_link_exclusive(source, destination)
+
+        with (
+            patch("autonomic_kb.storage._link_exclusive", side_effect=failing_for_second),
+            self.assertRaises(RuntimeError) as raised,
+            semantic_transaction(self.vault),
+        ):
+            atomic_write(first, "kb rewrite of a\n")
+            atomic_write(second, "kb rewrite of b\n")
+            with first.open("a", encoding="utf-8") as handle:
+                handle.write("first human edit\n")
+            raise RuntimeError("injected failure")
+        notes = "\n".join(raised.exception.__notes__)
+        self.assertIn("a.md ->", notes)
+        self.assertIn("could not restore b.md", notes)
+        self.assertEqual(first.read_text(), originals[0])
+        self.assertEqual(storage.rollback_conflicts(self.vault)[0]["conflicts"][0]["path"], "a.md")
+        with self.assertRaisesRegex(ValueError, "kb reconcile"):
+            KnowledgeIndex(self.config).index_vault()
+        journal = storage.pending_transactions(self.vault)[0]["journal"]
+        _editor_atomic_save(first, "second human save\n")
+        result = storage.resolve_transaction(self.vault, journal, "restore-snapshot")
+        self.assertEqual((first.read_text(), second.read_text()), originals)
+        self.assertEqual(result["conflicts"][0]["path"], "a.md")
+        kept = _every_file_text(self.vault / ".kb" / "rolled-back")
+        self.assertIn("first human edit", kept)
+        self.assertIn("second human save", kept)
+        KnowledgeIndex(self.config).index_vault()
+
+    def test_rollback_works_where_hard_links_are_unsupported(self):
+        note = write_memory(self.config, "note.md", "note", "Note", "before")
+        other = write_memory(self.config, "other.md", "other", "Other", "untouched by the KB")
+        original = note.read_text()
+        with (
+            patch("autonomic_kb.storage.os.link", side_effect=PermissionError("hard links unsupported")),
+            self.assertRaises(RuntimeError),
+            semantic_transaction(self.vault),
+        ):
+            atomic_write(note, "kb rewrite\n")
+            _editor_atomic_save(other, "a person's save\n")
+            raise RuntimeError("injected failure")
+        self.assertEqual(note.read_text(), original)
+        self.assertEqual(other.read_text(), "a person's save\n")
+        self.assertTrue(list((self.vault / ".kb" / "rolled-back").rglob("note.md")))
+
 
 class RaceSafeMoveTests(unittest.TestCase):
     def setUp(self):
@@ -148,7 +242,7 @@ class RaceSafeMoveTests(unittest.TestCase):
             fired.append(True)
             if edit == "atomic":
                 _editor_atomic_save(note, f"{human}\n")
-            elif edit == "in-place":
+            elif edit == "in-place":  # opened by path after the capture, so this re-creates the note
                 with note.open("a", encoding="utf-8") as handle:
                     handle.write(f"{human}\n")
             else:  # through a descriptor the editor opened before the move started
@@ -220,6 +314,44 @@ class RaceSafeMoveTests(unittest.TestCase):
         self.assertIn("editor re-created the note", _every_file_text(config.vault / ".kb" / "rolled-back"))
         self.assertEqual(storage.rollback_conflicts(config.vault)[0]["conflicts"][0]["path"], "note.md")
 
+    def _forget_with_failing_copies(self, failures: int) -> tuple[KBConfig, Path, str, BaseException]:
+        """Forget where hard links are unsupported and the first ``failures`` copies fill the disk."""
+        config = make_vault(Path(self.temporary.name) / f"copy-fails-{failures}")
+        note = write_memory(config, "facts/note.md", "kb:global:fact:note", "Note", "Some fact", scope="global")
+        original = note.read_text()
+        real_copy = shutil.copyfileobj
+        calls: list[str] = []
+
+        def partial_copy(reader, writer, *args, **kwargs):
+            calls.append(writer.name)
+            if len(calls) <= failures:
+                writer.write(reader.read(40))  # some bytes land, then the disk is full
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_copy(reader, writer, *args, **kwargs)
+
+        with (
+            patch("autonomic_kb.storage.os.link", side_effect=PermissionError("hard links unsupported")),
+            patch("autonomic_kb.storage.shutil.copyfileobj", side_effect=partial_copy),
+            self.assertRaises(OSError) as raised,
+        ):
+            forget(config, "kb:global:fact:note")
+        return config, note, original, raised.exception
+
+    def test_a_copy_that_fails_part_way_leaves_no_truncated_note(self):
+        config, note, original, _ = self._forget_with_failing_copies(1)
+        self.assertEqual(list((config.vault / config.archive_dir).glob("*.md")), [])
+        self.assertEqual(note.read_text(), original)
+        self.assertEqual(list(config.vault.rglob("*.kb-move-*")), [])
+        KnowledgeIndex(config).index_vault()  # not blocked
+
+    def test_when_every_copy_fails_the_captured_note_is_reported_and_reconcile_restores_it(self):
+        config, note, original, error = self._forget_with_failing_copies(1000)
+        self.assertIn("the captured version", "\n".join(error.__notes__))
+        self.assertEqual(list((config.vault / config.archive_dir).glob("*.md")), [])
+        journal = storage.pending_transactions(config.vault)[0]["journal"]
+        storage.resolve_transaction(config.vault, journal, "restore-snapshot")
+        self.assertEqual(note.read_text(), original)
+
 
 class CrashReconcileOwnershipTests(unittest.TestCase):
     """After a real crash, `kb reconcile --restore-snapshot` restores only what the KB wrote."""
@@ -233,8 +365,13 @@ class CrashReconcileOwnershipTests(unittest.TestCase):
         self.other = write_memory(self.config, "other.md", "other", "Other", "a note the KB never touches")
         self.original = self.kb_note.read_text()
 
+    def _crash(self, script: str) -> None:
+        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        command = [sys.executable, "-c", script, str(self.vault), str(self.kb_note), str(self.config.repo)]
+        self.assertEqual(subprocess.run(command, env=environment, check=False).returncode, 1)
+
     def _crash_after_kb_write(self) -> str:
-        script = (
+        self._crash(
             "import os, sys\n"
             "from pathlib import Path\n"
             "from autonomic_kb.storage import semantic_transaction\n"
@@ -243,10 +380,46 @@ class CrashReconcileOwnershipTests(unittest.TestCase):
             "    atomic_write(Path(sys.argv[2]), 'half-finished kb write\\n')\n"
             "    os._exit(1)\n"
         )
-        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
-        command = [sys.executable, "-c", script, str(self.vault), str(self.kb_note)]
-        self.assertEqual(subprocess.run(command, env=environment, check=False).returncode, 1)
         return storage.pending_transactions(self.vault)[0]["journal"]
+
+    def test_a_crash_before_any_kb_write_restores_nothing(self):
+        self._crash(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb.storage import semantic_transaction\n"
+            "with semantic_transaction(Path(sys.argv[1])):\n"
+            "    os._exit(1)  # killed while planning, before the first write\n"
+        )
+        _editor_atomic_save(self.other, "edited by a person after the crash\n")
+        (self.vault / "after-crash.md").write_text("created by a person after the crash\n")
+        pending = storage.pending_transactions(self.vault)[0]
+        self.assertEqual(pending["kb_written"], [])
+        self.assertEqual(pending["external"], ["after-crash.md", "other.md"])
+        result = storage.resolve_transaction(self.vault, pending["journal"], "restore-snapshot", delete_new=True)
+        self.assertEqual(result["restored"], [])
+        self.assertEqual(self.other.read_text(), "edited by a person after the crash\n")
+        self.assertTrue((self.vault / "after-crash.md").exists())
+
+    def test_a_crash_right_after_a_move_lands_is_attributed_to_the_kb(self):
+        self._crash(
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb.config import KBConfig\n"
+            "from autonomic_kb.healing import forget\n"
+            "real = os.link\n"
+            "def crash_after(source, target, *args, **kwargs):\n"
+            "    real(source, target, *args, **kwargs)\n"
+            "    if '99-archive' in str(target):\n"
+            "        os._exit(1)\n"
+            "os.link = crash_after\n"
+            "forget(KBConfig.load(Path(sys.argv[1]), Path(sys.argv[3])), 'kb-note')\n"
+        )
+        pending = storage.pending_transactions(self.vault)[0]
+        self.assertIn("99-archive/kb-note.md", pending["kb_written"])
+        self.assertNotIn("99-archive/kb-note.md", pending["external"])
+        storage.resolve_transaction(self.vault, pending["journal"], "restore-snapshot")
+        self.assertEqual(self.kb_note.read_text(), self.original)
+        self.assertEqual(list((self.vault / "99-archive").glob("*.md")), [])
 
     def test_restore_snapshot_keeps_changes_to_paths_the_kb_never_wrote(self):
         journal = self._crash_after_kb_write()
@@ -311,14 +484,33 @@ class CrashReconcileOwnershipTests(unittest.TestCase):
 
 
 class HealLifecycleTests(unittest.TestCase):
+    """Heal must never move a note past review or back into retrieval.
+
+    The vault retrieves low-scoring notes (minimum_score 0.05), and a stale control note
+    proves that a note heal had wrongly turned ``stale`` would show up in both the MCP
+    catalog and retrieval, so those assertions can fail.
+    """
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         config = make_vault(Path(self.temporary.name))
         path = config.vault / "kb.toml"
         switch = "allow_cross_repo=false\nallow_privileged_remember=false"
-        path.write_text(path.read_text().replace("allow_cross_repo=false", switch))
+        text = path.read_text().replace("allow_cross_repo=false", switch)
+        path.write_text(text.replace("minimum_score=0.20", "minimum_score=0.05"))
         self.config = KBConfig.load(config.vault, config.repo)
+        write_memory(
+            self.config,
+            "facts/control.md",
+            "kb:global:fact:stale-control",
+            "Stale control",
+            "Stale control note about the nightly deploy job and the release checklist.",
+            scope="global",
+            status="stale",
+            confidence=0.56,
+            freshness="stale",
+        )
 
     def _heal(self) -> dict:
         healer = Healer(self.config)
@@ -335,6 +527,10 @@ class HealLifecycleTests(unittest.TestCase):
             manifest = Retriever(self.config, index).retrieve(task, budget=400, record=False)
         return {item.id for item in manifest.items}
 
+    def _assert_visible_when_stale(self, task: str) -> None:
+        self.assertIn("kb:global:fact:stale-control", self._catalog())
+        self.assertIn("kb:global:fact:stale-control", self._retrieved(task))
+
     def test_heal_keeps_an_unreviewed_candidate_out_of_the_catalog_and_retrieval(self):
         candidate = {
             "title": "Nightly deploy job",
@@ -344,15 +540,17 @@ class HealLifecycleTests(unittest.TestCase):
         }
         result = MCPServer(self.config).call_tool("kb_remember", candidate)
         self.assertEqual(result["status"], "inbox")
-        self.assertEqual(self._catalog(), set())
+        self.assertNotIn(result["memory_id"], self._catalog())
         first = self._heal()
         planned = {action["action"] for action in first["actions"] if action["path"] == result["path"]}
         self.assertIn("mark-stale", planned)
         self._heal()
         note = self.config.vault / result["path"]
         self.assertEqual(_status(note), "inbox")
-        self.assertEqual(self._catalog(), set())
-        self.assertNotIn(result["memory_id"], self._retrieved("nightly deploy job documentation site"))
+        task = "nightly deploy job documentation site"
+        self._assert_visible_when_stale(task)
+        self.assertNotIn(result["memory_id"], self._catalog())
+        self.assertNotIn(result["memory_id"], self._retrieved(task))
 
     def test_heal_does_not_revive_retired_notes(self):
         paths = {}
@@ -371,8 +569,63 @@ class HealLifecycleTests(unittest.TestCase):
             self._heal()
         for status, path in paths.items():
             self.assertEqual(_status(path), status)
-        self.assertEqual(self._catalog(), set())
-        self.assertEqual(self._retrieved("release checklist retired note"), set())
+        task = "release checklist retired note"
+        self._assert_visible_when_stale(task)
+        retired = {f"kb:global:fact:{status}" for status in paths}
+        self.assertEqual(self._catalog() & retired, set())
+        self.assertEqual(self._retrieved(task) & retired, set())
+
+    def test_repeated_heal_marks_a_stale_note_once(self):
+        path = write_memory(
+            self.config,
+            "facts/once.md",
+            "kb:global:fact:once",
+            "Once",
+            "A note whose source path disappeared.",
+            scope="global",
+            invalidation={"paths": ["nonexistent.py"]},
+        )
+        for _ in range(3):
+            self._heal()
+        metadata = parse_markdown(path.read_text()).metadata
+        self.assertEqual((metadata["status"], metadata["confidence"]), ("stale", 0.72))
+        operations = [item.operation for item in OperationLedger(self.config).iter_operations("kb:global:fact:once")]
+        self.assertEqual(operations, ["AMEND"])
+
+    def test_heal_reports_a_conflict_its_rollback_preserved(self):
+        note = write_memory(
+            self.config,
+            "facts/active.md",
+            "kb:global:fact:active",
+            "Active",
+            "Active note.",
+            scope="global",
+            invalidation={"paths": ["nonexistent.py"]},
+        )
+        real_append, real_validate = OperationLedger.append, Validator.validate
+        calls: list[int] = []
+
+        def append_then_human_edits(ledger, *args, **kwargs):
+            with note.open("a", encoding="utf-8") as handle:  # Obsidian appends to the note heal rewrote
+                handle.write("Human edit during heal\n")
+            return real_append(ledger, *args, **kwargs)
+
+        def validate_with_regression(validator):
+            report = real_validate(validator)
+            calls.append(1)
+            if len(calls) == 2:  # post-validation finds a new error, so heal rolls back
+                report.issues.append(ValidationIssue("error", "injected", "facts/active.md", "new error", "", False))
+            return report
+
+        with (
+            patch.object(OperationLedger, "append", append_then_human_edits),
+            patch.object(Validator, "validate", validate_with_regression),
+        ):
+            result = self._heal()
+        self.assertTrue(result["rolled_back"])
+        conflict = result["rollback"]["conflicts"][0]
+        self.assertEqual(conflict["path"], "facts/active.md")
+        self.assertIn("Human edit during heal", (self.config.vault / conflict["preserved"]).read_text())
 
     def test_heal_still_marks_an_active_note_stale(self):
         path = write_memory(
@@ -471,6 +724,56 @@ class ReviewerInterleavingTests(unittest.TestCase):
         self.assertEqual(self._note("kb:global:fact:new1")["status"], "inbox")
         self.assertEqual(self._operations("kb:global:fact:other"), [])
         self.assertEqual(self._operations("kb:global:fact:old"), ["SUPERSEDE"])
+
+    def test_competing_split_fails_when_its_source_was_superseded_meanwhile(self):
+        first, second = Lifecycle(self.config), Lifecycle(self.config)
+        try:
+            with self.assertRaisesRegex(ValueError, "already superseded"):
+                self._interleave(
+                    lambda: first.split(
+                        "kb:global:fact:old", ["kb:global:fact:new1", "kb:global:fact:other"], reason="reviewer A"
+                    ),
+                    lambda: second.supersede("kb:global:fact:old", "kb:global:fact:new2", reason="reviewer B"),
+                )
+        finally:
+            first.close()
+            second.close()
+        self.assertEqual(self._note("kb:global:fact:new1")["status"], "inbox")
+        self.assertNotIn("split_from", self._note("kb:global:fact:other"))
+        self.assertEqual(self._operations("kb:global:fact:old"), ["SUPERSEDE"])
+
+    def test_competing_revalidate_fails_when_the_note_was_superseded_meanwhile(self):
+        first, second = Lifecycle(self.config), Lifecycle(self.config)
+        try:
+            with self.assertRaisesRegex(ValueError, "superseded and cannot be revalidated"):
+                self._interleave(
+                    lambda: first.revalidate("kb:global:fact:old", reason="reviewer A"),
+                    lambda: second.supersede("kb:global:fact:old", "kb:global:fact:new2", reason="reviewer B"),
+                )
+        finally:
+            first.close()
+            second.close()
+        self.assertEqual(self._operations("kb:global:fact:old"), ["SUPERSEDE"])
+
+    def test_a_status_changed_on_disk_after_indexing_is_refused(self):
+        lifecycle = Lifecycle(self.config)
+        real_note = lifecycle._note
+
+        def indexed_then_edited(identity):
+            note = real_note(identity)  # the index says inbox; a person then activates it by hand
+            path = self.config.vault / note["path"]
+            path.write_text(path.read_text().replace('status: "inbox"', 'status: "active"'))
+            return note
+
+        try:
+            with (
+                patch.object(lifecycle, "_note", side_effect=indexed_then_edited),
+                self.assertRaisesRegex(ValueError, "changed on disk from inbox to active"),
+            ):
+                lifecycle.promote("kb:global:fact:new1", reason="reviewer")
+        finally:
+            lifecycle.close()
+        self.assertEqual(self._operations("kb:global:fact:new1"), [])
 
     def test_promote_rechecks_status_under_the_lock(self):
         first, second = Lifecycle(self.config), Lifecycle(self.config)
