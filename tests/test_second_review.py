@@ -190,14 +190,14 @@ class NoClobberMoveTests(unittest.TestCase):
         existing.write_text("created by an external editor\n")
         source = self.config.vault / "note.md"
         source.write_text("moving note\n")
-        real_exists = Path.exists
+        real_lexists = os.path.lexists
 
-        def racing_exists(path: Path) -> bool:  # the editor creates the file after the check
-            return False if path.parent == directory else real_exists(path)
+        def racing_lexists(path) -> bool:  # the editor creates the file after the check
+            return False if Path(path).parent == directory else real_lexists(path)
 
         with (
             patch("autonomic_kb.storage.os.link", side_effect=PermissionError("links unsupported")),
-            patch.object(Path, "exists", racing_exists),
+            patch("autonomic_kb.storage.os.path.lexists", side_effect=racing_lexists),
         ):
             moved = move_into(source, directory, "kb:global:fact:note").destination
         self.assertEqual(existing.read_text(), "created by an external editor\n")

@@ -196,7 +196,7 @@ kb validation-queue
 kb heal             # dry-run
 kb heal --apply     # backup + apply + post-validation + rollback on regression
 kb reconcile        # list crashed transactions and rollbacks that preserved conflicting saves
-kb reconcile <id> --acknowledge   # mark a rollback's preserved files reviewed
+kb reconcile <id> --acknowledge   # mark the preserved files listed now as reviewed
 ```
 
 Quarantine redacts secret values (keys stay readable, private-key blocks are removed) in the vault copy; the unredacted original stays only in the local `.kb/backups/`, which the vault `.gitignore` written by `kb init` excludes. Backup sets older than 30 days are removed when the next write starts. Rotate any credential that was ever committed, because Git history keeps it.
