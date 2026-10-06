@@ -302,7 +302,10 @@ def move_into(source: Path, directory: Path, identity: str) -> Moved:
             kept, exact = _place(staged, conflict, identity, sha256_file(staged))
         except OSError as failure:
             # Keep the only copy of the changed version where it is, and say where that is.
-            _keep(context, source, staged, f"{reason}; the conflict copy could not be placed ({failure})")
+            if not _keep(context, source, staged, f"{reason}; the conflict copy could not be placed ({failure})"):
+                raise OSError(
+                    errno.EIO, f"could not record the changed version of {source.name} kept at {staged}"
+                ) from failure
             moved.conflicts.append({"path": str(source), "kept": str(staged), "reason": reason})
         else:
             moved.conflicts.append({"path": str(source), "kept": str(kept), "reason": reason})
@@ -472,6 +475,7 @@ class _OwnedLog(dict):
         self.path = journal.with_suffix(".owned")
         self.digests: dict[str, str | None] = {}
         self.before: dict[str, str] = {}
+        self.stages: list[dict[str, Any]] = []
         _append_durably(self.path, None)
 
     def __setitem__(self, key: str, digest: str | None) -> None:
@@ -492,7 +496,9 @@ class _OwnedLog(dict):
         relative = _protected_relative(self.root, tracked_key(source))
         stage = _vault_relative(self.root, staged)
         if relative is not None and stage is not None:
-            _append_durably(self.path, {"stage": stage, "path": relative, "digest": self.digests.get(relative)})
+            entry = {"stage": stage, "path": relative, "digest": self.digests.get(relative)}
+            _append_durably(self.path, entry)
+            self.stages.append(entry)
 
 
 def _vault_relative(root: str, path: Path) -> str | None:
@@ -526,11 +532,12 @@ def _transaction_for(path: Path) -> _Transaction | None:
     return None
 
 
-def _keep(context: _Transaction | None, source: Path, kept: Path, reason: str) -> None:
-    """Record that the only copy of a captured version stays at ``kept``, so recovery reports it."""
-    if context is not None:
-        entry = {"op": "kept", "kind": "conflict", "path": context.relative(source), "reason": reason}
-        context.inventory.append({**entry, "preserved": context.relative(kept)}, best_effort=True)
+def _keep(context: _Transaction | None, source: Path, kept: Path, reason: str) -> bool:
+    """Record that the only copy of a captured version stays at ``kept``; False if that failed."""
+    if context is None:
+        return True
+    entry = {"op": "kept", "kind": "conflict", "path": context.relative(source), "reason": reason}
+    return context.inventory.append({**entry, "preserved": context.relative(kept)}, best_effort=True)
 
 
 class _Inventory:
@@ -547,8 +554,13 @@ class _Inventory:
         self.vault = vault
         self.directory = vault / ROLLED_BACK_DIRECTORY / holding_id
         self.path = self.directory / "recovery.jsonl"
+        self.last_capture = ""
 
     def append(self, entry: dict[str, Any], *, best_effort: bool = False) -> bool:
+        """Append ``entry``; captures and kept versions get a unique ``id`` that acknowledgement names."""
+        if entry.get("op") in {"capture", "kept"}:
+            entry = {"id": uuid.uuid4().hex, **entry}
+            self.last_capture = entry["id"]
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
             _append_durably(self.path, {**entry, "at": utc_now()})
@@ -632,15 +644,18 @@ def _capture(target: Path, kept: Path, inventory: _Inventory, relative: str, exp
     The capture is recorded in ``inventory``, with the reserved name, before anything moves;
     if that record cannot be written this raises and ``target`` is left untouched.
     """
+    if not os.path.lexists(target):
+        return None  # nothing to capture, so nothing to record
     kept.parent.mkdir(parents=True, exist_ok=True)
     destination = next(name for name in _free_names(kept, relative) if not os.path.lexists(name))
     via = _private_name(target.parent, "rollback")
-    intent = {"op": "capture", "path": relative, "to": inventory.relative(destination), "expected": expected}
-    inventory.append({**intent, "via": inventory.relative(via)})
+    capture = uuid.uuid4().hex
+    intent = {"op": "capture", "id": capture, "path": relative, "to": inventory.relative(destination)}
+    inventory.append({**intent, "expected": expected, "via": inventory.relative(via)})
     try:
         os.rename(target, destination)
     except FileNotFoundError:
-        inventory.append({"op": "outcome", "to": intent["to"], "kind": "absent"}, best_effort=True)
+        inventory.append({"op": "outcome", "id": capture, "to": intent["to"], "kind": "absent"}, best_effort=True)
         return None
     except OSError as error:
         if error.errno != errno.EXDEV:
@@ -729,8 +744,10 @@ def _undo(
     kept = _capture(target, inventory.directory / relative, inventory, relative, expected)
     if kept is not None:
         preserved = inventory.relative(kept)
+        capture = inventory.last_capture
         if expected is not None and sha256_file(kept) == expected:
-            inventory.append({"op": "outcome", "to": preserved, "kind": "set_aside"}, best_effort=True)
+            outcome = {"op": "outcome", "id": capture, "to": preserved, "kind": "set_aside"}
+            inventory.append(outcome, best_effort=True)
             result.set_aside.append(preserved)
         else:
             reason = (
@@ -738,7 +755,8 @@ def _undo(
                 if expected
                 else "created by another program after the KB removed it"
             )
-            inventory.append({"op": "outcome", "to": preserved, "kind": "conflict", "reason": reason}, best_effort=True)
+            outcome = {"op": "outcome", "id": capture, "to": preserved, "kind": "conflict", "reason": reason}
+            inventory.append(outcome, best_effort=True)
             result.conflicts.append({"path": relative, "preserved": preserved, "reason": reason})
     if source is None:
         record_write(target, None)  # for an enclosing transaction
@@ -782,7 +800,12 @@ def _report_rollback(holding_id: str, result: _Rollback, error: BaseException) -
 
 
 def _replay(vault: Path, path: Path) -> dict[str, Any]:
-    """Summarize one recovery inventory, resolving interrupted captures against the filesystem."""
+    """Summarize one recovery inventory, resolving interrupted captures against the filesystem.
+
+    Only preserved files that still exist are listed. Each captured or kept version has its
+    own id, and acknowledgement names ids, so a later capture that reuses a freed name is
+    listed again rather than inheriting an earlier acknowledgement.
+    """
     entries = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -791,20 +814,26 @@ def _replay(vault: Path, path: Path) -> dict[str, Any]:
             continue  # a line cut short by a crash
         if isinstance(entry, dict):
             entries.append(entry)
-    captures = {str(entry["to"]): entry for entry in entries if entry.get("op") == "capture" and "to" in entry}
-    outcomes = {str(entry["to"]): entry for entry in entries if entry.get("op") == "outcome" and "to" in entry}
+
+    def key(entry: dict[str, Any]) -> str:
+        return str(entry.get("id") or entry.get("to", ""))
+
+    captures = {key(entry): entry for entry in entries if entry.get("op") == "capture" and "to" in entry}
+    outcomes = {key(entry): entry for entry in entries if entry.get("op") == "outcome" and "to" in entry}
     acknowledged = {
-        str(value) for entry in entries if entry.get("op") == "acknowledged" for value in entry.get("preserved", [])
+        str(value) for entry in entries if entry.get("op") == "acknowledged" for value in entry.get("ids", [])
     }
     set_aside: list[str] = []
     found: dict[str, dict[str, str]] = {}
-    for to, intent in captures.items():
-        outcome = outcomes.get(to)
+    for identity, intent in captures.items():
+        outcome = outcomes.get(identity)
         if outcome is not None:
-            kind, preserved, reason = outcome.get("kind"), to, str(outcome.get("reason", ""))
+            kind, preserved, reason = outcome.get("kind"), str(intent["to"]), str(outcome.get("reason", ""))
+            if not _held(vault, preserved):
+                continue
         else:
             # Recorded but never concluded (bookkeeping failed or the process died): look.
-            names = [name for name in (to, intent.get("via")) if isinstance(name, str)]
+            names = [name for name in (intent.get("to"), intent.get("via")) if isinstance(name, str)]
             preserved = next((name for name in names if _held(vault, name)), None)
             if preserved is None:
                 continue
@@ -815,15 +844,20 @@ def _replay(vault: Path, path: Path) -> dict[str, Any]:
         if kind == "set_aside":
             set_aside.append(preserved)
         elif kind == "conflict":
-            found[preserved] = {"path": str(intent.get("path", "")), "preserved": preserved, "reason": reason}
+            item = {"id": identity, "path": str(intent.get("path", "")), "preserved": preserved, "reason": reason}
+            found[identity] = item
+    seen: set[str] = set()
     for entry in entries:
-        if entry.get("op") == "kept" and _held(vault, entry.get("preserved")):
-            item = {key: str(entry.get(key, "")) for key in ("path", "preserved", "reason")}
-            if entry.get("kind") == "set_aside":
-                set_aside.append(item["preserved"])
-            else:
-                found[item["preserved"]] = item
-    pending = [item for preserved, item in found.items() if preserved not in acknowledged]
+        preserved = entry.get("preserved")
+        if entry.get("op") != "kept" or preserved in seen or not _held(vault, preserved):
+            continue
+        seen.add(str(preserved))  # the same private file may be recorded by a move and by recovery
+        item = {"id": key(entry), **{name: str(entry.get(name, "")) for name in ("path", "preserved", "reason")}}
+        if entry.get("kind") == "set_aside":
+            set_aside.append(item["preserved"])
+        else:
+            found[item["id"]] = item
+    pending = [item for identity, item in found.items() if identity not in acknowledged]
     errors = [
         {"path": str(entry.get("path", "")), "error": str(entry.get("error", ""))}
         for entry in entries
@@ -859,9 +893,9 @@ def acknowledge_rollback(vault: Path, transaction: str) -> dict[str, Any]:
         inventory = _Inventory(vault, transaction)
         if not inventory.path.is_file():
             raise ValueError(f"no recovery record for transaction {transaction}")
-        preserved = [item["preserved"] for item in _replay(vault, inventory.path)["conflicts"]]
-        inventory.append({"op": "acknowledged", "preserved": preserved})
-    return {"transaction": transaction, "acknowledged": True, "preserved": preserved}
+        conflicts = _replay(vault, inventory.path)["conflicts"]
+        inventory.append({"op": "acknowledged", "ids": [item["id"] for item in conflicts]})
+    return {"transaction": transaction, "acknowledged": True, "preserved": [item["preserved"] for item in conflicts]}
 
 
 def _contained(root: Path, relative: Any) -> Path | None:
@@ -1067,17 +1101,42 @@ def resolve_transaction(vault: Path, journal: str, mode: str, *, delete_new: boo
 
 
 def _report_stranded_moves(vault: Path, holding: str, stages: list[dict[str, Any]], result: _Rollback) -> None:
-    """Record notes an interrupted move left at its private name, so recovery reports them."""
+    """Record notes an interrupted move left at its private name, so recovery reports them.
+
+    A note that cannot be recorded becomes an error, which keeps the journal (and the
+    write log naming the private file) for a retry.
+    """
     inventory = _Inventory(vault, holding)
+    recorded = {
+        str(entry.get("preserved"))
+        for log in (vault / ROLLED_BACK_DIRECTORY).glob("*/recovery.jsonl")
+        for entry in _entries(log)
+        if entry.get("op") == "kept"
+    }
     for stage in stages:
-        if not _held(vault, stage["stage"]):
+        if not _held(vault, stage["stage"]) or stage["stage"] in recorded:
             continue
         digest = stage.get("digest")
         own = isinstance(digest, str) and sha256_file(vault / stage["stage"]) == digest
         reason = "captured by a move that did not finish" + ("" if own else "; it holds another program's version")
         entry = {"path": stage["path"], "preserved": stage["stage"], "reason": reason}
-        if inventory.append({"op": "kept", "kind": "set_aside" if own else "conflict", **entry}, best_effort=True):
-            (result.set_aside.append(stage["stage"]) if own else result.conflicts.append(entry))
+        if not inventory.append({"op": "kept", "kind": "set_aside" if own else "conflict", **entry}, best_effort=True):
+            failure = f"could not record the note left at {stage['stage']}"
+            result.errors.append({"path": stage["path"], "error": failure})
+        elif own:
+            result.set_aside.append(stage["stage"])
+        else:
+            result.conflicts.append(entry)
+
+
+def _entries(log: Path) -> list[dict[str, Any]]:
+    entries = []
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        with contextlib.suppress(ValueError):
+            entry = json.loads(line)
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
 
 
 def prune_local_copies(vault: Path, retention_days: int = LOCAL_COPY_RETENTION_DAYS) -> list[str]:
@@ -1151,6 +1210,7 @@ def semantic_transaction(vault: Path):
                 yield
         except BaseException as error:
             result = _rollback(vault, identity, journal, owned.digests, owned.before, files)
+            _report_stranded_moves(vault, identity, owned.stages, result)
             _report_rollback(identity, result, error)
             keep = bool(result.unavailable or result.errors)
             if keep:

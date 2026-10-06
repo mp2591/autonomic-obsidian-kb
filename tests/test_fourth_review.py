@@ -361,6 +361,79 @@ class DurableInventoryTests(_Vault):
         kept = "\n".join(path.read_text() for path in (self.vault / ".kb" / "rolled-back").rglob("a*.md"))
         self.assertIn("first human save", kept)  # the acknowledged version is still there
 
+    def test_a_new_capture_at_a_freed_name_is_not_covered_by_an_old_acknowledgement(self):
+        first = write_memory(self.config, "a.md", "a", "A", "before a")
+        second = write_memory(self.config, "b.md", "b", "B", "before b")
+        script = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb.storage import semantic_transaction\n"
+            "from autonomic_kb.util import atomic_write\n"
+            "with semantic_transaction(Path(sys.argv[1])):\n"
+            "    atomic_write(Path(sys.argv[2]), 'kb a\\n')\n"
+            "    atomic_write(Path(sys.argv[3]), 'kb b\\n')\n"
+            "    os._exit(1)\n"
+        )
+        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        command = [sys.executable, "-c", script, str(self.vault), str(first), str(second)]
+        self.assertEqual(subprocess.run(command, env=environment, check=False).returncode, 1)
+        journal = storage.pending_transactions(self.vault)[0]["journal"]
+        saved = self.vault / ".kb-transactions" / journal / "b.md"
+        away = Path(self.temporary.name) / "b.md"
+        shutil.move(saved, away)
+        _editor_atomic_save(first, "first human save\n")
+        with self.assertRaisesRegex(ValueError, "b.md"):
+            storage.resolve_transaction(self.vault, journal, "restore-snapshot")
+        (row,) = storage.rollback_conflicts(self.vault)
+        storage.acknowledge_rollback(self.vault, row["transaction"])
+        (self.vault / row["conflicts"][0]["preserved"]).unlink()  # the person dealt with it and removed it
+        _editor_atomic_save(first, "second human save\n")
+        shutil.move(away, saved)
+        storage.resolve_transaction(self.vault, journal, "restore-snapshot")
+        (row,) = storage.rollback_conflicts(self.vault)
+        (conflict,) = row["conflicts"]
+        self.assertIn("second human save", (self.vault / conflict["preserved"]).read_text())
+
+    def test_failing_to_record_a_note_a_crashed_move_left_keeps_the_journal(self):
+        note = write_memory(self.config, "facts/note.md", "kb:global:fact:note", "Note", "A fact.", scope="global")
+        original = note.read_text()
+        script = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from autonomic_kb.config import KBConfig\n"
+            "from autonomic_kb.healing import forget\n"
+            "real = os.rename\n"
+            "def crash_after(source, target):\n"
+            "    real(source, target)\n"
+            "    if os.path.basename(str(target)).startswith('.kb-move-'):\n"
+            "        os._exit(1)\n"
+            "os.rename = crash_after\n"
+            "forget(KBConfig.load(Path(sys.argv[1]), Path(sys.argv[2])), 'kb:global:fact:note')\n"
+        )
+        environment = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        command = [sys.executable, "-c", script, str(self.vault), str(self.config.repo)]
+        self.assertEqual(subprocess.run(command, env=environment, check=False).returncode, 1)
+        (staged,) = list((self.vault / "facts").glob(".kb-move-*"))
+        journal = storage.pending_transactions(self.vault)[0]["journal"]
+        holding = self.vault / ".kb" / "rolled-back"
+        real_append = storage._append_durably
+
+        def full_disk_for_recovery(path, *args, **kwargs):
+            if holding in Path(path).parents:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real_append(path, *args, **kwargs)
+
+        with (
+            patch("autonomic_kb.storage._append_durably", side_effect=full_disk_for_recovery),
+            self.assertRaisesRegex(ValueError, "could not record the note left at"),
+        ):
+            storage.resolve_transaction(self.vault, journal, "restore-snapshot")
+        self.assertEqual(storage.pending_transactions(self.vault)[0]["journal"], journal)
+        result = storage.resolve_transaction(self.vault, journal, "restore-snapshot")
+        self.assertEqual(note.read_text(), original)
+        self.assertIn(staged.relative_to(self.vault).as_posix(), result["set_aside"])
+        self.assertEqual(storage.pending_transactions(self.vault), [])
+
 
 class ConflictPlacementFailureTests(_Vault):
     """Finding 4: a failure placing the conflict copy must not strand the only human version."""
