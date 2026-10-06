@@ -255,7 +255,7 @@ class RaceSafeMoveTests(unittest.TestCase):
             if not links:
                 raise PermissionError("hard links unsupported")
             real_link(source, destination, *args, **kwargs)
-            if Path(destination).parent == existing.parent:
+            if Path(destination).parent == existing.parent and not Path(destination).name.startswith(".kb-probe-"):
                 editor()
 
         def copy(source, destination):
@@ -409,7 +409,7 @@ class CrashReconcileOwnershipTests(unittest.TestCase):
             "real = os.link\n"
             "def crash_after(source, target, *args, **kwargs):\n"
             "    real(source, target, *args, **kwargs)\n"
-            "    if '99-archive' in str(target):\n"
+            "    if '99-archive' in str(target) and '.kb-probe-' not in str(target):\n"
             "        os._exit(1)\n"
             "os.link = crash_after\n"
             "forget(KBConfig.load(Path(sys.argv[1]), Path(sys.argv[3])), 'kb-note')\n"

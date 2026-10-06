@@ -123,7 +123,8 @@ def record_write(path: Path, digest: str | None) -> None:
 
 def atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    # A short fixed prefix: a temporary name built from the note name could exceed the name limit.
+    fd, temporary = tempfile.mkstemp(prefix=".kb-write-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(content)
