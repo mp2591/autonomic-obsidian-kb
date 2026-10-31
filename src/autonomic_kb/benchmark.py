@@ -125,7 +125,13 @@ class TraceBenchmarkRunner:
 
     def run(self) -> dict[str, Any]:
         summary = TelemetryStore(self.config).paired_summary()
-        items = [item for item in summary["items"] if item.get("matched") and item.get("usage_complete")]
+        # Do not exclude failed tasks just because their usage counters were lost.
+        # Each metric reports its own observed denominator.
+        items = [item for item in summary["items"] if item.get("matched")]
+        counts = {
+            field: sum(item.get(field) is not None for item in items)
+            for field in ("success_delta", "token_delta", "search_delta", "read_delta")
+        }
 
         def mean_known(field: str) -> float | None:
             values = [item[field] for item in items if item.get(field) is not None]
@@ -135,7 +141,11 @@ class TraceBenchmarkRunner:
             "created_at": utc_now(),
             "pairs": len(items),
             "descriptive_pairs": summary["pairs"],
-            "complete_usage_pairs": summary.get("complete_usage_pairs", 0),
+            "matched_pairs": len(items),
+            "token_pairs": counts["token_delta"],
+            "complete_usage_pairs": counts["token_delta"],
+            "metric_pairs": counts,
+            "rejected": summary["rejected"],
             "mean_success_delta": mean_known("success_delta"),
             "mean_token_delta": mean_known("token_delta"),
             "mean_search_delta": mean_known("search_delta"),

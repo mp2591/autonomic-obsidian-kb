@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autonomic-obsidian-kb"
-version = "0.3.0"
+version = "0.3.1"
 description = "Evidence-driven, token-economical autonomic Obsidian knowledge infrastructure for AI agents"
 readme = "README.md"
 requires-python = ">=3.11"

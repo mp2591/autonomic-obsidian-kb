@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -8,6 +9,8 @@ from .config import KBConfig
 from .security import reject_secrets
 from .storage import vault_lock
 from .util import atomic_write, stable_json, utc_now
+
+ACCOUNTING_VERSION = 2
 
 FEEDBACK_KINDS = {
     "helpful",
@@ -47,14 +50,14 @@ class TaskOutcome:
     success: bool
     input_tokens: int | None = None
     output_tokens: int | None = None
-    cached_tokens: int | None = 0
-    searches: int | None = 0
-    file_reads: int | None = 0
-    commands: int | None = 0
-    retries: int | None = 0
-    corrections: int | None = 0
-    latency_ms: float = 0.0
-    maintenance_tokens: int | None = 0
+    cached_tokens: int | None = None
+    searches: int | None = None
+    file_reads: int | None = None
+    commands: int | None = None
+    retries: int | None = None
+    corrections: int | None = None
+    latency_ms: float | None = None
+    maintenance_tokens: int | None = None
     unsafe: bool = False
     retrieved_ids: list[str] = field(default_factory=list)
     created_at: str = ""
@@ -64,7 +67,9 @@ class TaskOutcome:
 
     @property
     def total_tokens(self) -> int | None:
-        if self.input_tokens is None or self.output_tokens is None or self.maintenance_tokens is None:
+        if not self.usage_complete or any(
+            value is None for value in (self.input_tokens, self.output_tokens, self.maintenance_tokens)
+        ):
             return None
         # cached_tokens is a subset/accounting dimension for many providers; do not double-count it.
         return self.input_tokens + self.output_tokens + self.maintenance_tokens
@@ -72,6 +77,8 @@ class TaskOutcome:
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["total_tokens"] = self.total_tokens
+        value["usage_complete"] = self.total_tokens is not None
+        value["accounting_version"] = ACCOUNTING_VERSION
         return value
 
 
@@ -134,6 +141,23 @@ class TelemetryStore:
         return value
 
     def record_outcome(self, outcome: TaskOutcome) -> TaskOutcome:
+        if outcome.kb_mode not in {"kb", "no-kb"}:
+            raise ValueError("outcome mode must be kb or no-kb")
+        for name in ("success", "unsafe", "usage_complete"):
+            if not isinstance(getattr(outcome, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        for name in ("task_id", "task_hash"):
+            if not isinstance(getattr(outcome, name), str) or not getattr(outcome, name).strip():
+                raise ValueError(f"{name} must be a nonempty string")
+        if not isinstance(outcome.pair_id, str) or not isinstance(outcome.metadata, dict):
+            raise ValueError("pair_id must be a string and metadata must be an object")
+        if outcome.latency_ms is not None and (
+            isinstance(outcome.latency_ms, bool)
+            or not isinstance(outcome.latency_ms, int | float)
+            or not math.isfinite(outcome.latency_ms)
+            or outcome.latency_ms < 0
+        ):
+            raise ValueError("latency must be finite, nonnegative, or unknown")
         counters = (
             "input_tokens",
             "output_tokens",
@@ -167,54 +191,85 @@ class TelemetryStore:
         if not self.outcome_path.exists():
             return []
         result: list[dict[str, Any]] = []
-        for line in self.outcome_path.read_text(encoding="utf-8").splitlines():
-            try:
-                result.append(json.loads(line))
-            except json.JSONDecodeError:
+        for number, line in enumerate(self.outcome_path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
                 continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"invalid outcome record at line {number}; repair before benchmarking") from error
+            if not isinstance(row, dict):
+                raise ValueError(f"outcome record at line {number} must be an object")
+            result.append(row)
         return result
 
     @staticmethod
-    def _delta(a: Any, b: Any) -> int | None:
-        if a is None or b is None:
+    def _counter(value: Any) -> int | None:
+        return value if type(value) is int and value >= 0 else None
+
+    @classmethod
+    def _delta(cls, a: Any, b: Any) -> int | None:
+        left, right = cls._counter(a), cls._counter(b)
+        return right - left if left is not None and right is not None else None
+
+    @classmethod
+    def _row_total(cls, row: dict[str, Any]) -> int | None:
+        # Earlier records could default omitted maintenance to zero. Retain them,
+        # but do not silently upgrade them into usage-complete measurements.
+        if row.get("accounting_version") != ACCOUNTING_VERSION or row.get("usage_complete") is not True:
             return None
-        return int(b) - int(a)
+        values = [cls._counter(row.get(key)) for key in ("input_tokens", "output_tokens", "maintenance_tokens")]
+        if any(value is None for value in values):
+            return None
+        cached = row.get("cached_tokens")
+        if cached is not None and (cls._counter(cached) is None or cached > values[0]):
+            return None
+        return sum(values)
 
     def paired_summary(self) -> dict[str, Any]:
-        groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
-        for row in self.outcomes():
-            key = str(row.get("pair_id") or row.get("task_hash", ""))
-            groups.setdefault(key, {}).setdefault(str(row.get("kb_mode", "")), []).append(row)
-        paired: list[dict[str, Any]] = []
+        groups: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = {}
         rejected = []
-        for pair_id, modes in groups.items():
+        for number, row in enumerate(self.outcomes(), 1):
+            mode = row.get("kb_mode")
+            if mode not in {"no-kb", "kb"} or not isinstance(row.get("success"), bool):
+                rejected.append({"record": number, "reason": "invalid mode or success label"})
+                continue
+            pair, task = row.get("pair_id"), row.get("task_hash")
+            if not isinstance(task, str) or not task or (pair and not isinstance(pair, str)):
+                rejected.append({"record": number, "reason": "invalid experiment identity"})
+                continue
+            # Explicit pair IDs must not collide with legacy task-hash grouping.
+            key = ("pair", pair) if pair else ("task", task)
+            groups.setdefault(key, {}).setdefault(mode, []).append(row)
+        paired: list[dict[str, Any]] = []
+        for (group_kind, pair_id), modes in groups.items():
             if len(modes.get("no-kb", [])) != 1 or len(modes.get("kb", [])) != 1:
                 rejected.append({"pair_id": pair_id, "reason": "missing or ambiguous experimental arm"})
                 continue
             baseline, assisted = modes["no-kb"][0], modes["kb"][0]
             fields = ("repo_snapshot", "vault_snapshot", "model_id", "agent_version", "evaluator_id", "tool_config")
             left, right = baseline.get("metadata", {}), assisted.get("metadata", {})
-            matched = bool(baseline.get("pair_id") and assisted.get("pair_id"))
-            matched = matched and baseline.get("task_hash") == assisted.get("task_hash")
+            matched = group_kind == "pair" and baseline.get("task_hash") == assisted.get("task_hash")
+            matched = matched and isinstance(left, dict) and isinstance(right, dict)
             matched = matched and all(left.get(field) and left.get(field) == right.get(field) for field in fields)
-            matched = matched and bool(left.get("evaluated") and right.get("evaluated"))
+            matched = matched and left.get("evaluated") is True and right.get("evaluated") is True
+            baseline_total, assisted_total = self._row_total(baseline), self._row_total(assisted)
             paired.append(
                 {
                     "pair_id": pair_id,
+                    "group_kind": group_kind,
                     "matched": bool(matched),
-                    "task_hash": assisted.get("task_hash") or baseline.get("task_hash"),
-                    "success_delta": int(bool(assisted.get("success"))) - int(bool(baseline.get("success"))),
-                    "token_delta": self._delta(baseline.get("total_tokens"), assisted.get("total_tokens")),
+                    "task_hash": assisted["task_hash"],
+                    "success_delta": int(assisted["success"]) - int(baseline["success"]),
+                    "token_delta": self._delta(baseline_total, assisted_total),
                     "search_delta": self._delta(baseline.get("searches"), assisted.get("searches")),
                     "read_delta": self._delta(baseline.get("file_reads"), assisted.get("file_reads")),
-                    "usage_complete": bool(
-                        baseline.get("usage_complete", True) and assisted.get("usage_complete", True)
-                    ),
+                    "usage_complete": baseline_total is not None and assisted_total is not None,
                 }
             )
         return {
             "pairs": len(paired),
-            "complete_usage_pairs": sum(bool(item["usage_complete"]) for item in paired),
+            "complete_usage_pairs": sum(item["usage_complete"] for item in paired),
             "items": paired,
             "rejected": rejected,
         }

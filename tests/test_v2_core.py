@@ -312,8 +312,14 @@ class Core(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             c = make_vault(Path(t))
             store = TelemetryStore(c)
-            store.record_outcome(TaskOutcome("a", "h", "no-kb", True, input_tokens=100, output_tokens=0, searches=3))
-            store.record_outcome(TaskOutcome("b", "h", "kb", True, input_tokens=50, output_tokens=0, searches=1))
+            store.record_outcome(
+                TaskOutcome(
+                    "a", "h", "no-kb", True, input_tokens=100, output_tokens=0, maintenance_tokens=0, searches=3
+                )
+            )
+            store.record_outcome(
+                TaskOutcome("b", "h", "kb", True, input_tokens=50, output_tokens=0, maintenance_tokens=0, searches=1)
+            )
             p = store.paired_summary()
             self.assertEqual(p["pairs"], 1)
             self.assertEqual(p["items"][0]["token_delta"], -50)

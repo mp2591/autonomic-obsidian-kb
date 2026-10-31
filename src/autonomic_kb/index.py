@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -14,12 +15,12 @@ from .models import MemoryRecord
 from .observability import EventLog
 from .security import scan_content
 from .storage import recover_transactions, vault_lock, vault_markdown_paths
-from .util import sha256_text, stable_json, terms, utc_now
+from .util import sha256_file, sha256_text, stable_json, terms, utc_now
 
 SCHEMA_VERSION = 2
 # Bump whenever parsing or index-time verdicts (such as the content safety scan) change;
 # unchanged notes are then re-read once instead of trusting stale derived columns.
-PARSER_FORMAT = "v3.2.0"
+PARSER_FORMAT = "v3.3.0"
 
 
 def _like_literal(value: str) -> str:
@@ -53,8 +54,6 @@ class KnowledgeIndex:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.fts5 = False
         self._ensure_schema()
-        parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
-        self._requires_reparse = not parser or parser[0] != PARSER_FORMAT
         self.events = EventLog(config.log_path)
 
     def close(self) -> None:
@@ -147,6 +146,11 @@ class KnowledgeIndex:
             # Replacing a file (as atomic writers do) changes its inode even when the coarse
             # mtime and the size are unchanged; existing rows are re-verified once.
             self.connection.execute("ALTER TABLE file_manifest ADD COLUMN inode INTEGER NOT NULL DEFAULT 0")
+        if "ctime_ns" not in manifest_columns:
+            # On POSIX, in-place edits can restore mtime/size/inode but not ctime.
+            # Zero-valued legacy manifests are revalidated once. This is a cache
+            # freshness hint, not a portable cryptographic integrity guarantee.
+            self.connection.execute("ALTER TABLE file_manifest ADD COLUMN ctime_ns INTEGER NOT NULL DEFAULT 0")
         try:
             self.connection.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5("
@@ -175,25 +179,38 @@ class KnowledgeIndex:
         return vault_markdown_paths(self.config.vault)
 
     def rebuild(self) -> IndexStats:
-        with self.connection:
-            self.connection.execute("DELETE FROM links")
-            self.connection.execute("DELETE FROM notes")
-            self.connection.execute("DELETE FROM notes_fts")
-            self.connection.execute("DELETE FROM file_manifest")
-        return self.index_vault(force=True)
+        return self._refresh(force=True, rebuild=True)
 
     def index_vault(self, force: bool = False) -> IndexStats:
+        return self._refresh(force=force)
+
+    def _refresh(self, *, force: bool, rebuild: bool = False) -> IndexStats:
         with vault_lock(self.config.vault):
             recover_transactions(self.config.vault)
-            result = self._index_vault(force or self._requires_reparse)
-            if self._requires_reparse:
-                self.connection.execute(
-                    "INSERT INTO meta(key,value) VALUES('parser_format',?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (PARSER_FORMAT,),
-                )
-                self.connection.commit()
-                self._requires_reparse = False
+            # Keep the old projection visible until the entire refresh succeeds.
+            # SAVEPOINT also composes with a transaction owned by the caller.
+            self.connection.execute("SAVEPOINT kb_index_refresh")
+            try:
+                # A caller can roll back an outer transaction after this returns.
+                # Read the transactional marker rather than caching a committed state.
+                parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
+                requires_reparse = not parser or parser[0] != PARSER_FORMAT
+                if rebuild:
+                    for table in ("links", "notes", "notes_fts", "file_manifest"):
+                        self.connection.execute(f"DELETE FROM {table}")
+                result = self._index_vault(force or requires_reparse)
+                if requires_reparse:
+                    self.connection.execute(
+                        "INSERT INTO meta(key,value) VALUES('parser_format',?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (PARSER_FORMAT,),
+                    )
+                self.connection.execute("RELEASE SAVEPOINT kb_index_refresh")
+            except BaseException:
+                self.connection.execute("ROLLBACK TO SAVEPOINT kb_index_refresh")
+                self.connection.execute("RELEASE SAVEPOINT kb_index_refresh")
+                raise
+            self.events.emit("index.completed", **result.to_dict())
             return result
 
     def _index_vault(self, force: bool = False) -> IndexStats:
@@ -204,7 +221,9 @@ class KnowledgeIndex:
         }
         manifest = {
             row["path"]: dict(row)
-            for row in self.connection.execute("SELECT path,mtime_ns,file_size,source_hash,inode FROM file_manifest")
+            for row in self.connection.execute(
+                "SELECT path,mtime_ns,file_size,source_hash,inode,ctime_ns FROM file_manifest"
+            )
         }
         seen_paths: set[str] = set()
         changed: dict[str, tuple[MemoryRecord, os.stat_result]] = {}
@@ -220,6 +239,21 @@ class KnowledgeIndex:
             if current and cached and not force and self._unchanged(cached, stat):
                 stats.unchanged += 1
                 declared_by_path[relative] = str(current.get("declared_id") or current["id"])
+                continue
+            # Hard-link transaction snapshots also change ctime. Verify their bytes
+            # without repeating YAML parsing, schema validation, or safety scans.
+            if (
+                current
+                and cached
+                and not force
+                and cached["mtime_ns"] == stat.st_mtime_ns
+                and cached["file_size"] == stat.st_size
+                and cached["inode"] == stat.st_ino
+                and sha256_file(absolute) == current["source_hash"]
+            ):
+                refreshed.append((relative, stat, current["source_hash"]))
+                declared_by_path[relative] = str(current.get("declared_id") or current["id"])
+                stats.unchanged += 1
                 continue
             record = self._parse(absolute, relative)
             if not record.schema_valid:
@@ -239,27 +273,25 @@ class KnowledgeIndex:
                 absolute = self.config.vault / relative
                 changed[relative] = (self._parse(absolute, relative), absolute.stat())
         removed = set(existing) - seen_paths
-        with self.connection:
-            for relative in removed | {path for path in changed if path in existing}:
-                self._delete_row(existing[relative]["id"], relative)
-            for relative in removed:
-                self.connection.execute("DELETE FROM file_manifest WHERE path=?", (relative,))
-                stats.deleted += 1
-            for relative in sorted(changed):
-                record, stat = changed[relative]
-                declared = declared_by_path[relative]
-                record.id = desired[relative]
-                self._insert(record, declared)
-                self._record_manifest(relative, stat, record.source_hash)
-                if relative in existing:
-                    stats.updated += 1
-                else:
-                    stats.indexed += 1
-            for relative, stat, source_hash in refreshed:
-                self._record_manifest(relative, stat, source_hash)
-            if changed or removed:
-                self._resolve_link_targets()
-        self.events.emit("index.completed", **stats.to_dict())
+        for relative in removed | {path for path in changed if path in existing}:
+            self._delete_row(existing[relative]["id"], relative)
+        for relative in removed:
+            self.connection.execute("DELETE FROM file_manifest WHERE path=?", (relative,))
+            stats.deleted += 1
+        for relative in sorted(changed):
+            record, stat = changed[relative]
+            declared = declared_by_path[relative]
+            record.id = desired[relative]
+            self._insert(record, declared)
+            self._record_manifest(relative, stat, record.source_hash)
+            if relative in existing:
+                stats.updated += 1
+            else:
+                stats.indexed += 1
+        for relative, stat, source_hash in refreshed:
+            self._record_manifest(relative, stat, source_hash)
+        if changed or removed:
+            self._resolve_link_targets()
         return stats
 
     @staticmethod
@@ -268,6 +300,7 @@ class KnowledgeIndex:
             int(cached["mtime_ns"]) == stat.st_mtime_ns
             and int(cached["file_size"]) == stat.st_size
             and int(cached.get("inode") or 0) == stat.st_ino
+            and int(cached.get("ctime_ns") or 0) == stat.st_ctime_ns
         )
 
     @staticmethod
@@ -286,18 +319,28 @@ class KnowledgeIndex:
         for relative in sorted(declared_by_path):
             by_declared.setdefault(declared_by_path[relative], []).append(relative)
         desired: dict[str, str] = {}
+        reserved = set(declared_by_path.values())
         for declared, paths in by_declared.items():
             owner = next((path for path in paths if existing.get(path, {}).get("id") == declared), paths[0])
             for path in paths:
-                desired[path] = declared if path == owner else f"{declared}::duplicate::{sha256_text(path)[:8]}"
+                if path == owner:
+                    desired[path] = declared
+                    continue
+                base = f"{declared}::duplicate::{sha256_text(path)[:8]}"
+                identity, suffix = base, 0
+                while identity in reserved:
+                    suffix += 1
+                    identity = f"{base}:{suffix}"
+                reserved.add(identity)
+                desired[path] = identity
         return desired
 
     def _record_manifest(self, relative: str, stat: os.stat_result, source_hash: str) -> None:
         self.connection.execute(
-            "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash,inode) VALUES(?,?,?,?,?) "
+            "INSERT INTO file_manifest(path,mtime_ns,file_size,source_hash,inode,ctime_ns) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(path) DO UPDATE SET mtime_ns=excluded.mtime_ns, file_size=excluded.file_size, "
-            "source_hash=excluded.source_hash, inode=excluded.inode",
-            (relative, stat.st_mtime_ns, stat.st_size, source_hash, stat.st_ino),
+            "source_hash=excluded.source_hash, inode=excluded.inode, ctime_ns=excluded.ctime_ns",
+            (relative, stat.st_mtime_ns, stat.st_size, source_hash, stat.st_ino, stat.st_ctime_ns),
         )
 
     def _delete_row(self, note_id: str, relative: str) -> None:
@@ -383,29 +426,50 @@ class KnowledgeIndex:
                         )
 
     def _resolve_link_targets(self) -> None:
-        notes = list(
-            self.connection.execute("SELECT id,declared_id,path,title FROM notes ORDER BY (id != declared_id), path")
+        """Resolve explicit identities/paths first; never guess an ambiguous alias."""
+        identities: dict[str, set[str]] = {}
+        aliases: dict[str, set[str]] = {}
+        paths: dict[str, str] = {}
+        extensionless: dict[str, str] = {}
+        source_paths: dict[str, str] = {}
+        for row in self.connection.execute("SELECT id,declared_id,path,title FROM notes"):
+            source_paths[row["id"]] = row["path"]
+            for identity in {row["id"], row["declared_id"]}:
+                if identity:
+                    identities.setdefault(identity, set()).add(row["id"])
+            path = Path(row["path"])
+            paths[row["path"]] = row["id"]
+            extensionless[path.with_suffix("").as_posix()] = row["id"]
+            for key in {row["title"], path.name, path.stem}:
+                if key:
+                    aliases.setdefault(key, set()).add(row["id"])
+
+        def path_target(value: str) -> str:
+            # foo.md is an exact file even when foo.md.md supplies the alias foo.md.
+            return paths.get(value, extensionless.get(value, ""))
+
+        def resolve(target: str, source: str) -> str:
+            if target in identities:
+                matches = identities[target]
+                return next(iter(matches)) if len(matches) == 1 else ""
+            if target.startswith(("./", "../")):
+                relative = posixpath.normpath(posixpath.join(posixpath.dirname(source), target))
+                return path_target(relative) if not relative.startswith("../") else ""
+            qualified = target.lstrip("/")
+            if qualified in paths or qualified in extensionless:
+                return path_target(qualified)
+            if "/" in target:
+                return ""  # A missing qualified path must not fall back to a basename.
+            matches = aliases.get(target, set())
+            return next(iter(matches)) if len(matches) == 1 else ""
+
+        updates = [
+            (resolve(row["target"], source_paths[row["source_id"]]), row["source_id"], row["target"], row["relation"])
+            for row in self.connection.execute("SELECT source_id,target,relation FROM links")
+        ]
+        self.connection.executemany(
+            "UPDATE links SET target_id=? WHERE source_id=? AND target=? AND relation=?", updates
         )
-        by_key: dict[str, str] = {}
-        for row in notes:
-            keys = {
-                row["id"],
-                row["declared_id"],
-                row["path"],
-                Path(row["path"]).with_suffix("").as_posix(),
-                row["title"],
-                Path(row["path"]).stem,
-            }
-            for key in keys:
-                if key and key not in by_key:
-                    by_key[str(key)] = row["id"]
-        for row in self.connection.execute("SELECT source_id,target,relation FROM links").fetchall():
-            target = str(row["target"])
-            target_id = by_key.get(target, by_key.get(Path(target).stem, ""))
-            self.connection.execute(
-                "UPDATE links SET target_id=? WHERE source_id=? AND target=? AND relation=?",
-                (target_id, row["source_id"], row["target"], row["relation"]),
-            )
 
     def get(self, memory_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
@@ -580,9 +644,7 @@ class KnowledgeIndex:
     def record_rank_example(self, retrieval_id: str, note_id: str, features: dict[str, float], selected: bool) -> None:
         self.record_rank_examples(retrieval_id, [(note_id, features, selected)])
 
-    def record_rank_examples(
-        self, retrieval_id: str, examples: Iterable[tuple[str, dict[str, float], bool]]
-    ) -> None:
+    def record_rank_examples(self, retrieval_id: str, examples: Iterable[tuple[str, dict[str, float], bool]]) -> None:
         now = utc_now()
         self.connection.executemany(
             "INSERT INTO rank_examples"
