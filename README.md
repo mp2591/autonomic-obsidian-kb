@@ -14,9 +14,11 @@ A memory is therefore not “text that matched a query.” It is a scoped, tempo
 
 ## V3: connected, tested context infrastructure
 
-Version **0.3.0** repairs the gap between architecture claims and the execution path. Query planning, source applicability, safe read gates, whole-representation compilation, explicit partial evidence, delivery counting, and host-acknowledged context deltas now participate in retrieval. The full implementation map, migration contract, and deliberate limitations are in [V3 implementation](docs/v3-implementation.md).
+Version **0.3.1** repairs the gap between architecture claims and the execution path. Query planning, source applicability, safe read gates, whole-representation compilation, explicit partial evidence, delivery counting, and host-acknowledged context deltas now participate in retrieval. The full implementation map, migration contract, and deliberate limitations are in [V3 implementation](docs/v3-implementation.md).
 
 **No empirical agent-token savings are claimed by the regression suite.** Unknown usage stays unknown. Default token counts are labeled estimates; an exact profile requires a registered exact tokenizer. Memory and receipts never authorize actions.
+
+The 0.3.1 reliability pass adds transactional index rebuilds, conservative link resolution, frozen replay inputs, honest missing-usage accounting, and installed-wheel CI. The [reliability contract](docs/reliability-contract.md) describes tested guarantees and limits; [evaluation](docs/evaluation-v2.md) explains the new per-metric denominators and legacy-record handling.
 
 ## Architecture
 

@@ -57,6 +57,14 @@ jobs:
           kb --vault examples/sample-vault retrieve "run the complete test suite" --budget 180
       - name: Benchmark guardrail
         run: python benchmarks/run.py
+      - name: Installed wheel smoke test
+        shell: bash
+        run: |
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/kb-wheels" .
+          python -m venv "$RUNNER_TEMP/kb-installed"
+          "$RUNNER_TEMP/kb-installed/bin/python" -m pip install "$RUNNER_TEMP/kb-wheels/"*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/kb-installed/bin/python" -I "$GITHUB_WORKSPACE/scripts/verify_installed_package.py"
 
   real-obsidian:
     name: Real Obsidian desktop + official CLI

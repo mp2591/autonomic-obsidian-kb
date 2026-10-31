@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — October 31, 2026
+
+### Index and graph integrity
+
+- Rebuilds and incremental refreshes now use one SQLite savepoint. Parse/insert failures leave the previously committed projection intact, and nested callers retain control of their outer transaction.
+- Duplicate row identities avoid all declared identities and other generated identities. Ambiguous canonical IDs, titles, and basenames no longer acquire arbitrary graph edges; missing qualified links cannot fall back to another folder. Explicit paths and source-relative `./` / `../` paths remain supported.
+- POSIX change-time metadata detects same-inode, same-size edits with restored modification times. Metadata-only hard-link changes verify bytes without repeating parsing, schema checks, or safety scanning. This is cache invalidation, not a portable security boundary.
+
+### Honest evaluation
+
+- Omitted maintenance, cached-input, work counters, and latency stay unknown. Explicit incomplete-usage flags remain incomplete. Outcome labels and latency are validated before writing; corrupt JSONL records are reported rather than silently discarded.
+- Success metrics include every matched evaluated pair even when usage is missing. Token/search/read means each expose their own denominator. Explicit pair IDs and legacy task-hash groups have separate namespaces.
+- New outcome records carry accounting version 2. Earlier durable rows remain available for outcome analysis, but their token totals do not silently become usage-complete measurements under the new contract.
+- Replay validates all case arguments before executing any commands, freezes one repository seed for both arms, verifies starting-state identities including executable bits, and keeps a nested memory vault out of the copied working trees. Shared Git worktree pointers and included directory/external symlinks are rejected; ignored environments are pruned before link checks.
+- Failed/timed-out agents still run the independent evaluator. Malformed agent metrics mark usage incomplete instead of losing the evaluated outcome. Trusted host commands are still not an OS sandbox.
+
+### Release verification
+
+- CI additionally builds a wheel and tests its packaged schema, version, and retrieval in a fresh virtual environment, outside the checkout with isolated Python imports.
+- Reproductions and failure-injection tests live in `tests/test_reliability_invariants.py` and `tests/test_replay_integrity.py`. Existing retrieval benchmark thresholds are unchanged.
+
+## September 2026 review changes (included in 0.3.1)
 
 Fixes from the September 2026 repository review. Each defect has a reproduction in `tests/test_review_regressions.py`; defects from the follow-up review are reproduced in `tests/test_second_review.py`.
 
