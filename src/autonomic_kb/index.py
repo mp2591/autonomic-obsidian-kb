@@ -54,8 +54,6 @@ class KnowledgeIndex:
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.fts5 = False
         self._ensure_schema()
-        parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
-        self._requires_reparse = not parser or parser[0] != PARSER_FORMAT
         self.events = EventLog(config.log_path)
 
     def close(self) -> None:
@@ -193,11 +191,15 @@ class KnowledgeIndex:
             # SAVEPOINT also composes with a transaction owned by the caller.
             self.connection.execute("SAVEPOINT kb_index_refresh")
             try:
+                # A caller can roll back an outer transaction after this returns.
+                # Read the transactional marker rather than caching a committed state.
+                parser = self.connection.execute("SELECT value FROM meta WHERE key='parser_format'").fetchone()
+                requires_reparse = not parser or parser[0] != PARSER_FORMAT
                 if rebuild:
                     for table in ("links", "notes", "notes_fts", "file_manifest"):
                         self.connection.execute(f"DELETE FROM {table}")
-                result = self._index_vault(force or self._requires_reparse)
-                if self._requires_reparse:
+                result = self._index_vault(force or requires_reparse)
+                if requires_reparse:
                     self.connection.execute(
                         "INSERT INTO meta(key,value) VALUES('parser_format',?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -208,7 +210,6 @@ class KnowledgeIndex:
                 self.connection.execute("ROLLBACK TO SAVEPOINT kb_index_refresh")
                 self.connection.execute("RELEASE SAVEPOINT kb_index_refresh")
                 raise
-            self._requires_reparse = False
             self.events.emit("index.completed", **result.to_dict())
             return result
 
@@ -429,6 +430,7 @@ class KnowledgeIndex:
         identities: dict[str, set[str]] = {}
         aliases: dict[str, set[str]] = {}
         paths: dict[str, str] = {}
+        extensionless: dict[str, str] = {}
         source_paths: dict[str, str] = {}
         for row in self.connection.execute("SELECT id,declared_id,path,title FROM notes"):
             source_paths[row["id"]] = row["path"]
@@ -436,11 +438,15 @@ class KnowledgeIndex:
                 if identity:
                     identities.setdefault(identity, set()).add(row["id"])
             path = Path(row["path"])
-            for key in (row["path"], path.with_suffix("").as_posix()):
-                paths[key] = row["id"]
+            paths[row["path"]] = row["id"]
+            extensionless[path.with_suffix("").as_posix()] = row["id"]
             for key in {row["title"], path.name, path.stem}:
                 if key:
                     aliases.setdefault(key, set()).add(row["id"])
+
+        def path_target(value: str) -> str:
+            # foo.md is an exact file even when foo.md.md supplies the alias foo.md.
+            return paths.get(value, extensionless.get(value, ""))
 
         def resolve(target: str, source: str) -> str:
             if target in identities:
@@ -448,10 +454,10 @@ class KnowledgeIndex:
                 return next(iter(matches)) if len(matches) == 1 else ""
             if target.startswith(("./", "../")):
                 relative = posixpath.normpath(posixpath.join(posixpath.dirname(source), target))
-                return paths.get(relative, "") if not relative.startswith("../") else ""
+                return path_target(relative) if not relative.startswith("../") else ""
             qualified = target.lstrip("/")
-            if qualified in paths:
-                return paths[qualified]
+            if qualified in paths or qualified in extensionless:
+                return path_target(qualified)
             if "/" in target:
                 return ""  # A missing qualified path must not fall back to a basename.
             matches = aliases.get(target, set())

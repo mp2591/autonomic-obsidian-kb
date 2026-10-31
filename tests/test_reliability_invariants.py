@@ -75,6 +75,41 @@ class IndexIntegrityTests(unittest.TestCase):
         self.assertIsNotNone(self.index.get("a"))
         self.assertIsNone(self.index.connection.execute("SELECT value FROM meta WHERE key='caller-owned'").fetchone())
 
+    def test_parser_upgrade_is_retried_after_outer_transaction_rollback(self):
+        self.note("a.md", "a")
+        self.index.index_vault()
+        self.index.connection.execute("UPDATE notes SET schema_valid=0")
+        self.index.connection.execute("UPDATE meta SET value='obsolete' WHERE key='parser_format'")
+        self.index.connection.commit()
+        with KnowledgeIndex(self.config) as upgraded:
+            upgraded.connection.execute("BEGIN")
+            upgraded.index_vault()
+            self.assertTrue(upgraded.get("a")["schema_valid"])
+            upgraded.connection.rollback()
+            self.assertFalse(upgraded.get("a")["schema_valid"])
+            with patch.object(upgraded, "_parse", wraps=upgraded._parse) as parse:
+                upgraded.index_vault()
+            self.assertEqual(parse.call_count, 1)
+            self.assertTrue(upgraded.get("a")["schema_valid"])
+
+    def test_exact_note_paths_take_precedence_over_extensionless_aliases(self):
+        for prefix in ("", "folder/"):
+            with self.subTest(prefix=prefix):
+                self.note(prefix + "foo.md", prefix + "first", "First")
+                self.note(prefix + "foo.md.md", prefix + "second", "Second")
+                self.note(
+                    prefix + "source.md",
+                    prefix + "source",
+                    "Source",
+                    {"related-to": [prefix + "foo.md", "./foo.md", prefix + "foo", prefix + "foo.md.md"]},
+                )
+                self.index.index_vault()
+                targets = self.targets(prefix + "source")
+                self.assertEqual(targets[prefix + "foo.md"], prefix + "first")
+                self.assertEqual(targets["./foo.md"], prefix + "first")
+                self.assertEqual(targets[prefix + "foo"], prefix + "first")
+                self.assertEqual(targets[prefix + "foo.md.md"], prefix + "second")
+
     def test_other_readers_do_not_observe_an_empty_rebuild(self):
         import sqlite3
 
